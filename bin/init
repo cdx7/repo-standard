@@ -1,0 +1,801 @@
+#!/usr/bin/env bash
+# init — scaffold a repo to the standard (see ../standard/STANDARD.md).
+#   init <target-dir> --authored | --vendor-derived [--name NAME] [--force] [--allow-dirty]
+# The target directory must already EXIST — init dresses a repo, it does not create one.
+# Stamps template/ into <target-dir>; reports add/over/skip. Authored content (README,
+# STATUS, tracker, DEVIATIONS, .gitignore) is NEVER overwritten — not even with --force.
+# --vendor-derived also installs bin/register, the register's tool, and its skeleton.
+# --force is scoped to the shared machinery only, and prints 'over' for each overwrite.
+# A git-repo target must be CLEAN (the migration baseline) — --allow-dirty overrides.
+# Does NOT author content, git init, or commit — those stay yours.
+set -euo pipefail
+# B71's class (convergence K1): an exported CDPATH makes every bare `cd` here both
+# reroutable AND chatty — cd echoes the resolved dir to stdout, so the F10 gate's
+# `$(cd -- "$TARGET" && pwd -P)` captured TWO lines, the toplevel equality failed,
+# and the dirty-tree refusal silently disarmed. sync and verify already carry this.
+unset CDPATH
+
+# Resolve $0 through symlinks (B44's class, B125): invoked via a symlink, dirname
+# gives the LINK's directory and the template would come up empty — sync and verify
+# both carry this fix; init failed closed but with a misleading "template not found".
+SELF="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)"
+TEMPLATE="$SELF/../template"
+VERSION="$(cat "$SELF/../VERSION" 2>/dev/null || echo '?')"
+err(){ printf 'init: %s\n' "$*" >&2; exit 1; }
+
+TARGET="" ARCH="" NAME="" FORCE="" ALLOW_DIRTY=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --authored)       ARCH=authored; shift ;;
+    --vendor-derived) ARCH=vendor-derived; shift ;;
+    # Value checked BEFORE `shift 2` (B34): a trailing --name made shift 2 fail under
+    # set -e — exit 1 with zero output on either stream.
+    --name)           [ $# -ge 2 ] || err "--name requires a value"; NAME="$2"; shift 2 ;;
+    --force)          FORCE=1; shift ;;
+    --allow-dirty)    ALLOW_DIRTY=1; shift ;;  # skip the F10 clean-tree refusal, knowingly
+    -h|--help)        sed -n '2,9p' "$0"; exit 0 ;;
+    -*)               err "unknown option '$1'" ;;
+    *)                if [ -z "$TARGET" ]; then TARGET="$1"; else err "unexpected arg '$1'"; fi; shift ;;
+  esac
+done
+# Normalize ALL trailing slashes off the target before any use (re-attack on B15):
+# `init dir/` doubled the slash in every "$TARGET/..." concatenation, so the B15 find's
+# template/ exclusion never matched (false refusal) and rel() degraded to absolute
+# paths. One ${TARGET%/} is not enough — `dir//` survives a single strip — hence the
+# loop; a bare '/' target stays intact.
+while [ "$TARGET" != "/" ] && [ "${TARGET%/}" != "$TARGET" ]; do TARGET="${TARGET%/}"; done
+[ -n "$TARGET" ]   || err "usage: init <target-dir> --authored|--vendor-derived [--name NAME]"
+[ -n "$ARCH" ]     || err "choose an archetype: --authored or --vendor-derived"
+[ -d "$TEMPLATE" ] || err "template not found at $TEMPLATE"
+
+# --- how printed advice names the target (B139) ----------------------------------------
+# Every refusal and the Next: block print commands the user is meant to paste. Two rules
+# keep them pasteable and readable: (1) the target is named by its ABSOLUTE path — `init .`
+# used to print `cd "."`, true, useless, and looks broken — and the `cd` is dropped
+# entirely when the target IS the invoker's cwd; (2) a name is quoted only when it needs
+# it (space, quote, glob character…), shell-safely in single quotes, so the common case
+# reads `git mv README README.md`, not `git mv "README" README.md`.
+shq(){ case "$1" in ''|*[!A-Za-z0-9._/:@%+=-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;; *) printf '%s' "$1" ;; esac; }
+tgt_abs="$(cd -- "$TARGET" 2>/dev/null && pwd)" || tgt_abs="$TARGET"
+if [ "$tgt_abs" = "$PWD" ]; then cdp=""; else cdp="cd $(shq "$tgt_abs") && "; fi
+# Bulleted steps (B139): a refusal prints its verdict, then ONE bullet per step with the
+# direction and its command on the same line, aligned; the last bullet is the exact re-run
+# (absolute init path, `.` after a "go there" bullet, else the target as typed, same flags).
+# A `# …` command is a no-op when pasted, so every bullet is safe to paste in order.
+steps=""
+add_step(){ steps="$steps"$'\n'"$(printf '      - %-15s %s' "$1:" "$2")"; }
+go_step(){ [ -z "$cdp" ] || add_step "go there" "cd $(shq "$tgt_abs")"; }
+rerun_step(){ add_step "re-run init" "$(shq "$SELF/init") $( [ -n "$cdp" ] && printf '.' || shq "$TARGET" ) --$ARCH${NAME:+ --name $(shq "$NAME")}${FORCE:+ --force}${ALLOW_DIRTY:+ --allow-dirty}"; }
+# --- mapping to the standard (F11): the STANDARD.md section each reported file serves ------
+# Printed as a fixed column between the action and the file, so a reader sees WHY each
+# file exists, not just that it landed. Labels avoid the section sign on purpose: bash's
+# printf pads by BYTES under a non-UTF-8 locale, and a two-byte § shifts the column.
+sect_of(){
+  case "$1" in
+    README.md)                              printf '[1] front door' ;;
+    CLAUDE.md)                              printf '[3] CLAUDE.md' ;;
+    REPO-STANDARD.md)                       printf '[3] notice' ;;
+    docs/official/DEVIATIONS.*|bin/register) printf '[V] vendor slot' ;;
+    docs/official/*|docs/dev-notes/STATUS)  printf '[2] docs homes' ;;
+    .claude/settings.json|.claude/hooks/*)  printf '[3] hooks' ;;
+    .gitignore|.gitignore.skel)             printf '[3] gitignore' ;;
+    .gitattributes|.gitattributes.skel)     printf '[3] eol=lf' ;;
+    docs/AI/session-handoffs/*)             printf '[4] handoffs' ;;
+    bin/track|docs/dev-notes/tracker.*)     printf '[5] tracker' ;;
+    .githooks/pre-commit)                   printf '[6] guard' ;;
+    .repo-standard-version)                 printf '[A] archetype' ;;
+    docs/reference/*)                       printf '[V] vendor slot' ;;
+    *)                                      printf '' ;;
+  esac
+}
+# A checkout that cannot state its own version must not stamp one anywhere.
+[ "$VERSION" != "?" ] || err "cannot read VERSION at $SELF/../VERSION — this checkout is incomplete; refusing to scaffold from it"
+# A mistyped target must ERROR, not scaffold a fresh tree at the typo (B18): the old
+# `mkdir -p` produced a complete, green-verifying repo at the wrong path, and sync and
+# verify happily followed it. For a genuinely new repo, mkdir it yourself first.
+if [ ! -d "$TARGET" ]; then
+  if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then err "target exists but is not a directory: $TARGET"
+  else err "target directory does not exist: $TARGET (mkdir it first if you really mean a brand-new repo)"; fi
+fi
+
+# Refuse to stamp the standard's own source tree: a stray .repo-standard-version here
+# would mark the source as its own consumer (B42/B88). sync carries the same guard —
+# and the template/ subtree needs its own check (it holds bin/ but not standard/).
+if [ -f "$TARGET/standard/STANDARD.md" ] && [ -d "$TARGET/template/bin" ]; then
+  err "$TARGET is the standard's own source repo — refusing to stamp it"
+fi
+if [ "$(basename "$(cd -- "$TARGET" && pwd)")" = "template" ] && [ -f "$TARGET/../standard/STANDARD.md" ]; then
+  err "$TARGET is the standard's template/ directory, not a consumer repo"
+fi
+
+# --- migration baseline: a git-repo target must be CLEAN (F10) -----------------------
+# The adoption commit right after init should contain ONLY what init wrote; a dirty or
+# untracked tree gets swept into that baseline and the migration diff stops meaning
+# anything. Checked BEFORE any write, so a refused init leaves the target untouched.
+# A non-git target has no commit to pollute — init never requires git of its target
+# (the Next: text offers `git init` afterward) — so there is nothing to check there.
+# Gated on the target being its OWN repo toplevel (F10 re-attack): a non-git dir nested
+# anywhere under a parent repo answers --is-inside-work-tree true, so the old check
+# counted the PARENT's status — the sole "dirty entry" could be the target itself, and
+# the documented brand-new-dir flow was refused on parent churn the user may not own.
+# Accepted residue: a target that is a SUBDIRECTORY of a monorepo (its own repo's
+# toplevel is an ancestor, not itself) gets no F10 protection at all.
+# -unormal pins the untracked mode (F10 re-attack): a repo-local
+# status.showUntrackedFiles=no otherwise empties the porcelain and waves through
+# exactly the untracked-dirt class this guard exists to catch.
+if [ -z "$ALLOW_DIRTY" ] && git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+   && [ "$(git -C "$TARGET" rev-parse --show-toplevel 2>/dev/null)" = "$(cd -- "$TARGET" && pwd -P)" ]; then
+  dirty_n="$(git -C "$TARGET" status --porcelain -unormal 2>/dev/null | grep -c . || true)"
+  if [ "$dirty_n" -gt 0 ]; then
+    # Bulleted (B139), and the common case named: when EVERY dirty entry is a file init
+    # itself writes, the dirt is an earlier run's uncommitted scaffold — the right move is
+    # the adoption commit, not a re-run (which could only report skips). -uall lists files
+    # (the -unormal count above collapses untracked dirs); a rename shows its new name.
+    scaffold_only=1
+    while IFS= read -r line; do
+      f="${line:3}"; f="${f#\"}"; f="${f%\"}"; case "$f" in *" -> "*) f="${f##* -> }" ;; esac
+      case "$f" in
+        .claude/settings.json|.claude/hooks/stop-handoff-check.sh|.claude/hooks/session-start-rollover-check.sh|.githooks/pre-commit|bin/track|bin/register|.gitignore|.gitattributes|README.md|CLAUDE.md|REPO-STANDARD.md|docs/dev-notes/STATUS|docs/dev-notes/tracker.md|docs/dev-notes/tracker.html|docs/official/.gitkeep|docs/AI/session-handoffs/.gitkeep|docs/reference/.gitkeep|docs/official/DEVIATIONS.md|docs/official/DEVIATIONS.html|.repo-standard-version) ;;
+        *) scaffold_only=0 ;;
+      esac
+    done < <(git -C "$TARGET" status --porcelain -uall 2>/dev/null)
+    n_word="$dirty_n dirty/untracked entr$( [ "$dirty_n" -eq 1 ] && echo y || echo ies )"
+    steps=""; go_step
+    if [ "$scaffold_only" -eq 1 ]; then
+      v="target repo has $n_word — all of them init's own scaffold from an earlier run, so it is already scaffolded. Nothing written."
+      add_step "see them" "git status --short"
+      add_step "commit it" "git add -A && git commit -m 'adopt repo-standard $VERSION ($ARCH)'"
+      add_step "then verify" "$(shq "$SELF/verify") . --strict"
+    else
+      v="target repo has $n_word — the adoption commit must hold only what init writes (migration baseline). Nothing written."
+      add_step "see them" "git status --short"
+      add_step "keep them" "git add -A && git commit -m '<what they are>'"
+      add_step "or set aside" "git stash -u"
+      rerun_step
+      add_step "or, knowingly" "$(shq "$SELF/init") $( [ -n "$cdp" ] && printf '.' || shq "$TARGET" ) --$ARCH --allow-dirty"
+    fi
+    err "$v$steps"
+  fi
+fi
+
+# --- handoffs dir pre-flight: never SHADOW a populated non-canonical one (B15) -------
+# The hooks bind to canonical docs/AI/session-handoffs outright when it exists, and only
+# SEARCH when it is absent. A repo whose handoffs live elsewhere (a moved docs tree, a
+# START_UP/ prefix) is served by that search today — creating an empty canonical dir
+# would re-bind the hooks to the empty dir and take the real history dark. Refused HERE,
+# before ANY write (B15 re-attack): the old mid-scaffold BLCK had already written ten
+# files, so its advised `git mv` died on a missing docs/AI parent and the advised re-run
+# tripped F10 on init's own scaffold. A refused init leaves the target untouched, so
+# the advised mv + commit returns a clean tree and the re-run needs no --allow-dirty.
+# LOCKSTEP: the find below is copied verbatim from .claude/hooks/stop-handoff-check.sh's
+# fallback discovery — same prunes, same exclusions, same shallowest-match pick, same
+# -mindepth 1 (B131: the prune tested the START point, so a target literally named
+# vendor / node_modules / .venv sailed past this pre-flight and init scaffolded over
+# the shadow it exists to catch). If the hook's search changes, this one must change
+# identically or init and the hooks disagree about where handoffs live. Accepted residue: the pipeline is line-based, so a parent
+# dirname containing a newline defeats it (in every copy).
+if [ ! -d "$TARGET/docs/AI/session-handoffs" ]; then
+  hfound="$(find "$TARGET" -mindepth 1 \( -name .git -o -name node_modules -o -name .venv -o -name vendor \) -prune \
+              -o -type d -name session-handoffs -not -path '*/example-handoffs/*' -not -path "$TARGET/template/*" -print 2>/dev/null \
+            | awk '{ n=gsub(/\//,"/"); print n, $0 }' | sort -k1,1n -k2,2 | head -n1 | cut -d' ' -f2-)"
+  # Only a POPULATED dir refuses — top level or a YYYYMM/ archive bucket (the hook reads
+  # both). An empty stray session-handoffs/ shadows nothing worth keeping.
+  if [ -n "$hfound" ] && [ -n "$(ls -1 "$hfound"/session-handoff-*.md \
+       "$hfound"/[0-9][0-9][0-9][0-9][0-9][0-9]/session-handoff-*.md 2>/dev/null)" ]; then
+    hrel="${hfound#"$TARGET"/}"
+    # The advice must be a command sequence that actually RUNS (convergence K2+L1) —
+    # and it is pasted from the INVOKER's cwd, not the target's, so it leads with
+    # cd "$TARGET" (convergence M4): target-relative paths acted on whatever tree
+    # the user happened to be standing in (the success path's Next: block already
+    # says cd; the refusal path did not).
+    # `git mv` needs a TRACKED source: for untracked or gitignored handoffs — or a
+    # non-git dir classified git via a PARENT work tree — it dies `fatal: source
+    # directory is empty`; and a non-git target cannot run git at all. Branch on what
+    # is true of THIS target: tracked -> git mv + commit (tree clean after, no
+    # --allow-dirty needed); git-but-untracked -> plain mv, then add+commit the
+    # relocated dir so the re-run clears F10; non-git -> plain mv, nothing to commit.
+    # The ./ pathspec anchor keeps a leading-':' name out of pathspec-magic land.
+    # Bulleted (B139): go there (when not already), make the home, move, [stage], commit,
+    # re-run. `git mv` needs a TRACKED source: untracked -> plain mv + add; non-git -> mv.
+    v="handoffs live at $hrel — refusing to shadow them with an empty canonical dir. Nothing written."
+    steps=""; go_step; add_step "make the home" "mkdir -p docs/AI"
+    if git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if git -C "$TARGET" ls-files --error-unmatch -- "./$hrel" >/dev/null 2>&1; then
+        add_step "move them" "git mv $(shq "$hrel") docs/AI/session-handoffs"
+      else
+        add_step "move them" "mv $(shq "$hrel") docs/AI/session-handoffs   # untracked: git mv cannot"
+        add_step "stage them" "git add docs/AI/session-handoffs"
+      fi
+      add_step "commit" "git commit -m 'handoffs: move to docs/AI/session-handoffs'"
+    else
+      add_step "move them" "mv $(shq "$hrel") docs/AI/session-handoffs"
+    fi
+    rerun_step
+    err "$v$steps"
+  fi
+fi
+
+# --- front-door pre-flight: never add a SECOND README beside one of another spelling (B137)
+# init and verify read exactly README.md (case-sensitive). A repo whose front door is
+# spelled README, readme.md, README.txt or README.rst used to get the skeleton ADDED
+# beside it — two front doors, verify blessing the skeleton and never opening the real
+# one. Refused HERE, before any write, so the advised rename + commit returns a clean
+# tree and the re-run needs no --allow-dirty (B15's shape). Only while README.md itself
+# is ABSENT: with both present init already skips the slot and verify's coexistence
+# WARN (B138) owns that state — refusing there would block every re-run on such a repo.
+# Spelling rule (lockstep with verify's B138 scan): the basename lowercases to `readme`
+# or `readme.<one extension>`; a README.md.bak or a readme/ directory is not a front
+# door. Files and symlinks count. Accepted residue: a case-insensitive filesystem answers
+# "README.md exists" for readme.md, so this gate never fires there and init skips the
+# slot instead — the same repo adopts differently by OS, but never gains a second door.
+# Inline test, not exists(): the helpers are defined further down, after the pre-flights.
+if ! { [ -e "$TARGET/README.md" ] || [ -L "$TARGET/README.md" ]; }; then
+  rv="" rv_first="" rv_rest="" rv_n=0
+  for f in "$TARGET"/*; do
+    [ -f "$f" ] || [ -L "$f" ] || continue
+    n="${f##*/}"; [ "$n" = README.md ] && continue
+    case "${n,,}" in
+      readme|readme.*) case "$n" in *.*.*) ;; *) rv="${rv:+$rv, }$n"; if [ -z "$rv_first" ]; then rv_first="$n"; else rv_rest="${rv_rest:+$rv_rest }$(shq "$n")"; fi; rv_n=$((rv_n+1)) ;; esac ;;
+    esac
+  done
+  if [ -n "$rv" ]; then
+    # Same three-way advice as B15: the command sequence must actually RUN from the
+    # invoker's cwd (cdp: absolute path, or nothing when already there), and `git mv`
+    # needs a TRACKED source. Three lines (B139): the verdict, what to do, then the
+    # command ALONE on its own line so it can be copied as printed — one 300-column
+    # line hid the command inside the prose.
+    if [ "$rv_n" -eq 1 ]; then
+      v="$rv is already the front door here; the standard reads only README.md. Nothing written."; lbl="rename it"
+    else
+      v="$rv are already front doors here; the standard reads only README.md. Nothing written."; lbl="rename one"
+    fi
+    mv_src="$(shq "$rv_first")"
+    steps=""; go_step
+    if git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      if git -C "$TARGET" ls-files --error-unmatch -- "./$rv_first" >/dev/null 2>&1; then
+        add_step "$lbl" "git mv $mv_src README.md"
+      else
+        add_step "$lbl" "mv $mv_src README.md   # untracked: git mv cannot move it"
+        add_step "stage it" "git add README.md"
+      fi
+      [ "$rv_n" -eq 1 ] || add_step "fold the rest" "# merge $rv_rest into README.md by hand, then: git rm $rv_rest"
+      add_step "commit" "git commit -m 'front door: $rv_first -> README.md'"
+    else
+      add_step "$lbl" "mv $mv_src README.md"
+      [ "$rv_n" -eq 1 ] || add_step "fold the rest" "# merge $rv_rest into README.md by hand, then: rm $rv_rest"
+    fi
+    rerun_step
+    err "$v$steps"
+  fi
+fi
+
+# Resolve the name from the REAL directory, not the argument's spelling (B35):
+# `init . --authored` used to stamp '# .' as the README's H1.
+NAME="${NAME:-$(basename "$(cd -- "$TARGET" && pwd)")}"
+# Validate BEFORE any write: a control character in the name would otherwise fail sed
+# only after the machinery is installed, leaving a partial scaffold with no summary.
+case "$NAME" in *[[:cntrl:]]*) err "--name contains a control character (newline/tab?) — pass a plain name" ;; esac
+# NAME is spliced into sed replacements below: escape the characters sed's replacement
+# language owns (&, \, and the | delimiter), or an ampersand in a name expands into
+# the matched text (B35's second half).
+NAME_SED="$(printf '%s' "$NAME" | sed 's/[&\\|]/\\&/g')"
+
+added=0 skipped=0 overwritten=0 blocked=0 mach_skipped=0 missing=0 wfail=0
+# A symlink COUNTS as present even when dangling: init never writes through a link it
+# did not create (B73) — every write below lands on nothing or a regular file.
+exists(){ [ -e "$1" ] || [ -L "$1" ]; }
+rel(){ printf '%s' "${1#"$TARGET"/}"; }
+# The same rule holds for every path COMPONENT between the target root and the leaf:
+# a symlinked docs/ or .claude/ would carry each "new" write into a foreign tree while
+# the leaf check sees nothing; a component that exists as a NON-directory (a file where
+# .claude should be) makes every write under it fail on stderr while the counters claim
+# success. Missing components are fine — mkdir -p creates them.
+parents_ok(){  # destination under $TARGET -> 0 clean; 1 a component is a symlink/non-dir
+  local p walk="$TARGET"; p="$(rel "$1")"
+  while [ "${p#*/}" != "$p" ]; do
+    walk="$walk/${p%%/*}"; p="${p#*/}"
+    if [ -L "$walk" ]; then return 1; fi
+    if [ -e "$walk" ] && [ ! -d "$walk" ]; then return 1; fi
+  done
+  return 0
+}
+
+# --- authored content: --force does not apply (B11) ----------------------------------
+# absent() gates the authored files. It returns 1 (skip) whenever the path exists —
+# init scaffolds what is missing and never replaces what you wrote.
+absent(){
+  if exists "$1"; then printf '  skip  %-16s %s\n' "$(sect_of "$(rel "$1")")" "$(rel "$1")"; skipped=$((skipped+1)); return 1; fi
+  if ! parents_ok "$1"; then
+    printf '  skip  %-16s %s (a parent path component is a symlink or not a directory — add the file yourself if you mean it)\n' "$(sect_of "$(rel "$1")")" "$(rel "$1")"
+    skipped=$((skipped+1)); return 1
+  fi
+  # Guarded (B102's class, B124): a failing mkdir under set -e killed init mid-run
+  # with a partial scaffold and no Done summary.
+  if ! mkdir -p "$(dirname "$1")" 2>/dev/null; then
+    printf '  FAIL  %-16s %s (cannot create the parent directory — permissions?)\n' "$(sect_of "$(rel "$1")")" "$(rel "$1")"
+    wfail=$((wfail+1)); return 1
+  fi
+  return 0
+}
+# gen writes tmp+mv (B36): `sed … > dst` TRUNCATES dst before sed can fail, and a
+# failed substitution left a self-concealing 0-byte README that later runs 'skip'ped
+# and verify PASSed. Now the destination appears complete or not at all.
+gen(){  if absent "$2"; then
+          local tmp="$2.tmp.$$"
+          # The cleanup rm is guarded too (re-attack on B124): when the directory
+          # allows neither the write NOR the unlink (rw-no-exec), a bare rm dies
+          # under set -e before err() can speak — the exact silent-death class.
+          if [ -n "${3:-}" ]; then sed "$3" "$1" >"$tmp" || { rm -f "$tmp" 2>/dev/null || true; err "generating $(rel "$2") failed"; }
+          else cp "$1" "$tmp" || { rm -f "$tmp" 2>/dev/null || true; err "generating $(rel "$2") failed"; }
+          fi
+          mv "$tmp" "$2" || { rm -f "$tmp" 2>/dev/null || true; err "placing $(rel "$2") failed"; }
+          printf '  add   %-16s %s\n' "$(sect_of "$(rel "$2")")" "$(rel "$2")"; added=$((added+1))
+        fi; return 0; }
+# A .gitkeep exists only to make git carry an EMPTY home (B146). A home that already holds
+# tracked files gets no placeholder: two migrated repos (one with handoffs, one with new vendor
+# docs) each committed one beside real content, and two rehearsal repos removed
+# theirs by hand. Judged from git's index for a git target — a home holding only untracked
+# files still needs the placeholder to reach a clone — and from the directory itself for a
+# non-git target. Both listings are consumed whole (B108/B114's pipefail discipline).
+home_populated(){  # $1 = the home directory
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  if git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$TARGET" ls-files -- "$(rel "$1")" 2>/dev/null | awk 'END{exit NR==0}'
+  else
+    ls -A "$1" 2>/dev/null | awk 'END{exit NR==0}'
+  fi
+}
+keep(){ if ! exists "$1" && home_populated "$(dirname "$1")"; then
+          printf '  skip  %-16s %s (the home already holds tracked files — no placeholder needed)\n' "$(sect_of "$(rel "$1")")" "$(rel "$1")"; skipped=$((skipped+1))
+        elif absent "$1"; then
+          # Guarded write (B124): a failed redirect under set -e was a silent death.
+          if : >"$1" 2>/dev/null; then printf '  add   %-16s %s\n' "$(sect_of "$(rel "$1")")" "$(rel "$1")"; added=$((added+1))
+          else printf '  FAIL  %-16s %s (write failed — permissions/disk?)\n' "$(sect_of "$(rel "$1")")" "$(rel "$1")"; wfail=$((wfail+1)); fi
+        fi; return 0; }
+
+# --- machinery: stamped file-by-file (B13); --force overwrites, safely (B12) ---------
+# The same file list sync ships — keep in lockstep with bin/sync's MACHINERY. Stamping
+# per FILE means a pre-existing .claude/ no longer blocks the hooks wholesale: init adds
+# what is missing inside it and names what it left alone, instead of skipping the dir.
+# bin/register, the register's tool (F17), is machinery for vendor-derived repos only:
+# an authored repo has no register for it to read. REPO-STANDARD.md, the notice that says
+# what the standard placed here and what not to break, goes to every adopted repo.
+MACHINERY=".claude/settings.json
+.claude/hooks/stop-handoff-check.sh
+.claude/hooks/session-start-rollover-check.sh
+.githooks/pre-commit
+bin/track
+REPO-STANDARD.md"
+[ "$ARCH" = vendor-derived ] && MACHINERY="$MACHINERY
+bin/register"
+is_exec(){ case "$1" in *.sh|*/pre-commit|*/track|*/register) return 0 ;; *) return 1 ;; esac; }
+
+put_mach(){
+  local relp="$1" src="$TEMPLATE/$1" dst="$TARGET/$1" tmp
+  # Missing template files are COUNTED (B109, B30's shape in init): they used to print
+  # this line and nothing else — exit 0, a clean Done summary, and a full-VERSION stamp
+  # over a scaffold with no hooks in it.
+  [ -f "$src" ] || { printf '  ???   %-16s %s (missing from template — this checkout of the standard is incomplete)\n' "$(sect_of "$relp")" "$relp"; missing=$((missing+1)); return 0; }
+  if ! parents_ok "$dst"; then
+    # Machinery under a symlinked .claude/ / .githooks/ / bin/ would land in a foreign
+    # tree (B73's parent-dir variant) — same refusal as a symlink leaf, --force included.
+    printf '  BLCK  %-16s %s (a parent path component is a symlink or not a directory — clear it yourself, then re-run)\n' "$(sect_of "$relp")" "$relp"
+    blocked=$((blocked+1))
+  elif ! exists "$dst"; then
+    # Guarded writes (B102's class, B124): a cp/chmod/mv failing under set -e used to
+    # kill init mid-run with a partial scaffold and no Done summary.
+    tmp="$dst.tmp.$$"
+    if mkdir -p "$(dirname "$dst")" 2>/dev/null && cp "$src" "$tmp" 2>/dev/null \
+       && { ! is_exec "$relp" || chmod +x "$tmp" 2>/dev/null; } && mv "$tmp" "$dst" 2>/dev/null; then
+      printf '  add   %-16s %s\n' "$(sect_of "$relp")" "$relp"; added=$((added+1))
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      printf '  FAIL  %-16s %s (write failed — permissions/disk?)\n' "$(sect_of "$relp")" "$relp"; wfail=$((wfail+1))
+    fi
+  elif [ -z "$FORCE" ]; then
+    # Only claim drift when there is some: an idempotent re-run should not send the
+    # user to sync over byte-identical files. The [ -f ]/[ ! -L ] gate keeps cmp off
+    # FIFOs (it would hang) and symlinks — those report as drift and sync BLCKs them.
+    if [ -f "$dst" ] && [ ! -L "$dst" ] && cmp -s "$src" "$dst" 2>/dev/null; then
+      printf '  skip  %-16s %s (exists, identical to the standard)\n' "$(sect_of "$relp")" "$relp"
+      skipped=$((skipped+1))
+    else
+      printf '  skip  %-16s %s (exists — run sync to reconcile drift)\n' "$(sect_of "$relp")" "$relp"
+      skipped=$((skipped+1)); mach_skipped=$((mach_skipped+1))
+    fi
+  elif [ -L "$dst" ] || [ ! -f "$dst" ]; then
+    # Even --force refuses a symlink or non-file destination: writing through a link
+    # destroys a file OUTSIDE this repo; writing onto a directory loses content (B59's
+    # class). Clearing such a destination is yours to do, knowingly.
+    printf '  BLCK  %-16s %s (destination is a %s — clear it yourself, then re-run)\n' \
+      "$(sect_of "$relp")" "$relp" "$( [ -L "$dst" ] && echo symlink || echo "non-regular file" )"
+    blocked=$((blocked+1))
+  else
+    tmp="$dst.tmp.$$"
+    if cp "$src" "$tmp" 2>/dev/null && { ! is_exec "$relp" || chmod +x "$tmp" 2>/dev/null; } \
+       && mv -f "$tmp" "$dst" 2>/dev/null; then
+      printf '  over  %-16s %s\n' "$(sect_of "$relp")" "$relp"; overwritten=$((overwritten+1))
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      printf '  FAIL  %-16s %s (write failed — permissions/disk?)\n' "$(sect_of "$relp")" "$relp"; wfail=$((wfail+1))
+    fi
+  fi
+  return 0
+}
+
+# Absolute path (B139): `init .` used to say "into ." — true, and useless in a log.
+printf 'Scaffolding "%s" (%s) into %s\n' "$NAME" "$ARCH" "$tgt_abs"
+printf '  ([n] = STANDARD.md spine rule n; [A] = archetype stamp; [V] = vendor-derived slot)\n'
+
+# --- spine: machinery, file-by-file (both archetypes) ---
+while IFS= read -r m; do [ -n "$m" ] && put_mach "$m"; done <<< "$MACHINERY"
+
+# --- gitignore slot -----------------------------------------------------------------
+# The local-settings rule must live IN THE REPO. A machine-global ignore protects only
+# the machine that has it; a clone anywhere else is one `git add -A` from committing
+# personal Claude permissions. Creates .gitignore when absent, otherwise APPENDS the one
+# missing line — never rewrites ignores you authored, and --force does not clobber it.
+# The slot is the GLOB `.claude/settings.local.json*` (B128): Claude Code rewrites the
+# file atomically through temp siblings named settings.local.json.tmp.<pid>.<hex>, which
+# the old exact-name rule left as untracked noise — and a sibling that vanishes between
+# `git add -A`'s enumeration and its stat aborts the whole add at exit 128 ("unable to
+# stat"). Covered means BOTH the file and its siblings are ignored by a specific rule:
+# the glob does both in one line; the exact name plus a `.tmp.*` (or `.*`) sibling rule
+# also counts, and the repair appends the glob next to whatever half is present.
+# Only the SPECIFIC rule counts as covered (B25; B127 collapsed two contradictory
+# tellings of this into one): an optional leading '/' and an optional '**/' prefix are
+# accepted, nothing else — a bare '.claude/', or its equal-effect '.claude/*', would
+# untrack the standard's own hooks, so neither counts, and appending the one specific
+# line next to either is harmless and keeps the file's intent legible. No leading-
+# whitespace tolerance (re-attack on B127): git does NOT strip leading blanks from
+# .gitignore patterns, so an indented rule ignores nothing and must not count as
+# covered. Trailing tolerance is git-exact (convergence N1): git strips trailing
+# SPACES only, after at most one CR of a CRLF ending — [[:space:]]*$ also admitted
+# tab/FF/VT, counting as covered a rule git does not honour — so the predicates
+# accept ` *\r?$` and nothing else, matching verify's blob_has_rule normalization.
+# The sibling half accepts the git-equivalent specific spellings `*`, `**`, `?*`,
+# `.*`, `.tmp.*` and their `**` forms (convergence N2) — all anchored to the full
+# settings.local.json name, so B25 specificity holds.
+# Judged by the LAST matching line per half, not grep presence (B132): git's parser is
+# last-match-wins, so `rule` followed by `!rule` un-ignores the file/siblings while the
+# old presence-only greps said covered forever and the travelling repair never fired
+# (verify's check-ignore probe already WARNed truthfully). A negation counts in exactly
+# the specific spellings that count as coverage, prefixed `!` — a broader `!.claude/*`
+# still slips this model, and verify stays the truthful judge — and the repair's EOF
+# append is the new last match, so one pass converges. Line 1 sheds a UTF-8 BOM first
+# (B133, blob_has_rule's M3 strip): git's parser skips it, so a BOM'd first-line rule
+# was honoured by git yet failed the line-anchored predicate — one redundant append,
+# then idle. LC_ALL=C keeps sprintf("%c") and the match byte-wise; no {n,m} intervals
+# (mawk lacks them). Keep this awk in lockstep with bin/sync's copy.
+ign_covered(){
+  LC_ALL=C awk '
+    BEGIN{ bom=sprintf("%c%c%c",239,187,191)
+           f_re="^/?(\\*\\*/)?\\.claude/settings\\.local\\.json(\\*\\*?)?$"
+           s_re="^/?(\\*\\*/)?\\.claude/settings\\.local\\.json(\\*\\*?|\\?\\*\\*?|\\.\\*\\*?|\\.tmp\\.\\*\\*?)$" }
+    { if (NR==1 && index($0,bom)==1) $0=substr($0,4)
+      sub(/\r$/,"")
+      while ($0 ~ / $/ && $0 !~ /\\ $/) sub(/ $/,"")
+      neg=0; l=$0
+      if (substr(l,1,1)=="!"){ neg=1; l=substr(l,2) }
+      if (l ~ f_re) f = neg ? 0 : 1
+      if (l ~ s_re) s = neg ? 0 : 1 }
+    END{ exit (f && s) ? 0 : 1 }' "$1" 2>/dev/null
+}
+# The second personal file (D34, decided 2026-09-14): CLAUDE.local.md holds a developer's own
+# Claude directives. Claude Code loads it after CLAUDE.md in every session, and its docs say to
+# gitignore it — but nothing does that on its own. Same model as ign_covered (last match wins,
+# BOM, CR and trailing-space handling), covered only by the UNANCHORED rule, spelled
+# `CLAUDE.local.md` or `**/CLAUDE.local.md`: Claude Code also reads a CLAUDE.local.md in any
+# subdirectory, so a root-anchored `/CLAUDE.local.md` does not count and the repair appends the
+# unanchored line after it. As with ign_covered, a broader or anchored negation can still slip
+# this textual model; verify's check-ignore probes stay the truthful judge.
+# Keep this awk in lockstep with bin/sync's copy.
+ign_local_covered(){
+  LC_ALL=C awk '
+    BEGIN{ bom=sprintf("%c%c%c",239,187,191); re="^(\\*\\*/)?CLAUDE\\.local\\.md$" }
+    { if (NR==1 && index($0,bom)==1) $0=substr($0,4)
+      sub(/\r$/,"")
+      while ($0 ~ / $/ && $0 !~ /\\ $/) sub(/ $/,"")
+      neg=0; l=$0
+      if (substr(l,1,1)=="!"){ neg=1; l=substr(l,2) }
+      if (l ~ re) c = neg ? 0 : 1 }
+    END{ exit c ? 0 : 1 }' "$1" 2>/dev/null
+}
+if ! exists "$TARGET/.gitignore"; then
+  if [ ! -f "$TEMPLATE/.gitignore.skel" ]; then
+    printf '  ???   %-16s %s (missing from template — this checkout of the standard is incomplete)\n' "$(sect_of ".gitignore.skel")" ".gitignore.skel"
+    missing=$((missing+1))
+  elif [ ! -r "$TEMPLATE/.gitignore.skel" ]; then
+    # An unreadable skel is the CHECKOUT's defect, not the target's (re-attack on
+    # B109): the cp-fail branch below blamed target permissions, counted a mere skip,
+    # stamped, and exited 0 — over a repo left without its settings.local.json net.
+    printf '  ???   %-16s %s (unreadable in template — this checkout of the standard is incomplete)\n' "$(sect_of ".gitignore.skel")" ".gitignore.skel"
+    missing=$((missing+1))
+  elif cp "$TEMPLATE/.gitignore.skel" "$TARGET/.gitignore" 2>/dev/null; then
+    printf '  add   %-16s %s\n' "$(sect_of ".gitignore")" ".gitignore"; added=$((added+1))
+  else
+    # A failed slot write is a FAIL, not a skip (B136): on the same unwritable fixture
+    # sync FAILs, HOLDs the stamp and exits 1, while init said 'skip', stamped and
+    # exited 0 — the same undelivered settings.local.json net, opposite verdicts.
+    # Riding wfail withholds the stamp and drives the nonzero exit, lockstep restored.
+    printf '  FAIL  %-16s %s (write failed — permissions? the personal-file ignore rules were NOT installed)\n' "$(sect_of ".gitignore")" ".gitignore"; wfail=$((wfail+1))
+  fi
+elif [ -L "$TARGET/.gitignore" ]; then
+  # Appending would write through the link into a file outside this repo (B73's class)
+  # — and would be pointless anyway: git >= 2.32 refuses to READ a symlinked
+  # .gitignore, so no rule reachable through the link protects anything (B134).
+  printf '  skip  %-16s %s (is a symlink — git 2.32+ does not read a symlinked .gitignore, so its rules protect nothing; replace the link with a regular file carrying .claude/settings.local.json* and CLAUDE.local.md)\n' "$(sect_of ".gitignore")" ".gitignore"
+  skipped=$((skipped+1))
+elif [ ! -f "$TARGET/.gitignore" ]; then
+  # A directory (or other non-file) here used to kill init mid-run at the `>>` under
+  # set -e, with no Done: line at all (B102).
+  printf '  skip  %-16s %s (exists but is not a regular file — add the .claude/settings.local.json* and CLAUDE.local.md rules yourself)\n' "$(sect_of ".gitignore")" ".gitignore"
+  skipped=$((skipped+1))
+elif ! ign_covered "$TARGET/.gitignore" || ! ign_local_covered "$TARGET/.gitignore"; then
+  # Guarded append (B102's second shape): an unwritable file must not kill init at the
+  # `>>` under set -e with no summary — say what failed and go on. But counted as a
+  # FAIL, not a skip (B136): sync FAILs, HOLDs the stamp and exits 1 on this exact
+  # fixture while init stamped and exited 0 over the same undelivered protection.
+  # ONE slot action appends only the rule(s) still missing — settings, CLAUDE.local.md,
+  # or both — so a repo that already carries one never gets it twice.
+  ign_add="" ign_what=""
+  if ! ign_covered "$TARGET/.gitignore"; then ign_add='\n# Claude Code personal settings + its atomic-write temp siblings — machine-local, never committed.\n.claude/settings.local.json*\n'; ign_what="+ .claude/settings.local.json*"; fi
+  if ! ign_local_covered "$TARGET/.gitignore"; then ign_add="$ign_add"'\n# Claude Code personal instructions (CLAUDE.local.md, at any depth) — personal, never committed.\nCLAUDE.local.md\n'; ign_what="${ign_what:+$ign_what, }+ CLAUDE.local.md"; fi
+  if printf '%b' "$ign_add" 2>/dev/null >> "$TARGET/.gitignore"; then
+    printf '  amend %-16s %s (%s)\n' "$(sect_of ".gitignore")" ".gitignore" "$ign_what"; added=$((added+1))
+  else
+    printf '  FAIL  %-16s %s (append failed — permissions? %s was NOT installed)\n' "$(sect_of ".gitignore")" ".gitignore" "$ign_what"
+    wfail=$((wfail+1))
+  fi
+else
+  printf '  skip  %-16s %s (already ignores .claude/settings.local.json with its temp siblings, and CLAUDE.local.md)\n' "$(sect_of ".gitignore")" ".gitignore"; skipped=$((skipped+1))
+fi
+
+# --- gitattributes slot (B95) --------------------------------------------------------
+# The machinery scripts must stay LF everywhere: a core.autocrlf=true clone otherwise
+# materializes them with CRLF and every hook dies exit 127 on the \r'd shebang. The
+# repo needs its OWN .gitattributes for that (the standard's file protects only the
+# standard). Same contract as the .gitignore slot: create when absent, APPEND the
+# machinery block when present but uncovered, never rewrite what you authored, and
+# --force does not clobber it. "Covered" = our machinery block (its .githooks line is
+# the marker) or a global always-LF rule like `* text=auto eol=lf`.
+attr_covered(){
+  grep -qE '^[[:space:]]*\.githooks/\*[[:space:]].*eol=lf' "$1" 2>/dev/null \
+  || grep -qE '^[[:space:]]*\*[[:space:]]+text(=auto)?[[:space:]]+eol=lf' "$1" 2>/dev/null
+}
+if ! exists "$TARGET/.gitattributes"; then
+  if [ ! -f "$TEMPLATE/.gitattributes.skel" ]; then
+    printf '  ???   %-16s %s (missing from template — this checkout of the standard is incomplete)\n' "$(sect_of ".gitattributes.skel")" ".gitattributes.skel"
+    missing=$((missing+1))
+  elif [ ! -r "$TEMPLATE/.gitattributes.skel" ]; then
+    # Same checkout-defect diagnosis as the .gitignore slot (re-attack on B109).
+    printf '  ???   %-16s %s (unreadable in template — this checkout of the standard is incomplete)\n' "$(sect_of ".gitattributes.skel")" ".gitattributes.skel"
+    missing=$((missing+1))
+  elif cp "$TEMPLATE/.gitattributes.skel" "$TARGET/.gitattributes" 2>/dev/null; then
+    printf '  add   %-16s %s\n' "$(sect_of ".gitattributes")" ".gitattributes"; added=$((added+1))
+  else
+    # FAIL, not skip (B136's class, kept consistent with the .gitignore slot): a repo
+    # left CRLF-fragile is likewise machinery init failed to deliver.
+    printf '  FAIL  %-16s %s (write failed — permissions? the machinery eol=lf pin was NOT installed)\n' "$(sect_of ".gitattributes")" ".gitattributes"; wfail=$((wfail+1))
+  fi
+elif [ -L "$TARGET/.gitattributes" ]; then
+  # Appending would write through the link into a file outside this repo (B73's class)
+  # — and git >= 2.32 refuses to READ a symlinked .gitattributes too (B134's class).
+  printf '  skip  %-16s %s (is a symlink — git 2.32+ does not read a symlinked .gitattributes; replace the link with a regular file, then pin the machinery to eol=lf)\n' "$(sect_of ".gitattributes")" ".gitattributes"
+  skipped=$((skipped+1))
+elif [ ! -f "$TARGET/.gitattributes" ]; then
+  # Same B102 hole as the .gitignore slot: a directory here killed init at the `>>`.
+  printf '  skip  %-16s %s (exists but is not a regular file — pin the machinery to eol=lf yourself)\n' "$(sect_of ".gitattributes")" ".gitattributes"
+  skipped=$((skipped+1))
+elif ! attr_covered "$TARGET/.gitattributes"; then
+  if printf '\n# repo-standard machinery must stay LF — a CRLF checkout breaks the shebang (exit 127).\n.claude/hooks/* text eol=lf\n.githooks/* text eol=lf\nbin/track text eol=lf\nbin/register text eol=lf\n' \
+       2>/dev/null >> "$TARGET/.gitattributes"; then
+    printf '  amend %-16s %s (+ machinery eol=lf block)\n' "$(sect_of ".gitattributes")" ".gitattributes"; added=$((added+1))
+  else
+    printf '  FAIL  %-16s %s (append failed — permissions? the machinery eol=lf pin was NOT installed)\n' "$(sect_of ".gitattributes")" ".gitattributes"
+    wfail=$((wfail+1))
+  fi
+else
+  printf '  skip  %-16s %s (already pins the machinery to eol=lf)\n' "$(sect_of ".gitattributes")" ".gitattributes"; skipped=$((skipped+1))
+fi
+
+# Whether the repo's OWN front door survives (F15): the Next: block then asks for its state
+# section rather than for the skeleton to be filled.
+readme_kept=0; if exists "$TARGET/README.md"; then readme_kept=1; fi
+gen  "$TEMPLATE/README.skel.md"                   "$TARGET/README.md"                 "s|<repo name>|$NAME_SED|"
+# Every adopted repo has a root CLAUDE.md (D34, decided 2026-09-14) — at minimum the pointer
+# to the personal CLAUDE.local.md. Authored content like README: stamped only when absent.
+gen  "$TEMPLATE/CLAUDE.skel.md"                   "$TARGET/CLAUDE.md"
+gen  "$TEMPLATE/docs/dev-notes/STATUS.skel"       "$TARGET/docs/dev-notes/STATUS"
+gen  "$TEMPLATE/docs/dev-notes/tracker.skel.md"   "$TARGET/docs/dev-notes/tracker.md" "s|<repo>|$NAME_SED|"
+# docs/official/: an authored repo gets the placeholder when the home is empty; a vendor-derived
+# repo's DEVIATIONS.md lives here (D47), so that home is never empty and gets no placeholder.
+[ "$ARCH" = vendor-derived ] || keep "$TARGET/docs/official/.gitkeep"
+
+# The B15 populated-stray refusal already ran in pre-flight, before any write — by the
+# time execution reaches here the canonical dir either exists or shadows nothing.
+keep "$TARGET/docs/AI/session-handoffs/.gitkeep"
+
+# --- vendor-derived slots (§ archetype) ---
+if [ "$ARCH" = vendor-derived ]; then
+  keep "$TARGET/docs/reference/.gitkeep"
+  # The register is authored end-user documentation, so its slot is docs/official/ (D47) and the
+  # skeleton opens with that home's status line (D46): a Draft until the first entries land.
+  # It is in bin/register's entry form (F17, spec § 5): empty types and sources tables and the
+  # marker pair, no entries — so the tool works on it from the first commit.
+  if absent "$TARGET/docs/official/DEVIATIONS.md"; then
+    # Guarded write (B124): a failed redirect under set -e was a silent mid-run death.
+    if cat 2>/dev/null >"$TARGET/docs/official/DEVIATIONS.md" <<EOF
+> **Draft.** Skeleton stamped by repo-standard \`init\` on $(date +%Y-%m-%d); fill the tables and add the first entries, then change this line to **Current** with that day's date.
+
+# Deviations
+
+Where this implementation diverges from the vendor documents in \`docs/reference/\`, and why.
+Each entry is a \`## N. Title\` heading, then one header line, then its reasoning:
+\`*Type:* <type> · *Status:* active · *Original:* YYYY-MM-DD · *Updated:* — · *Source:* <key> <location>\`.
+Cite an entry as \`register N\`. \`bin/register render\` keeps the summary and
+\`DEVIATIONS.html\` in step; \`bin/register check\` validates.
+
+## Types
+
+| Type | Meaning |
+| --- | --- |
+
+## Sources
+
+| Key | Document | Version | Date | Path |
+| --- | --- | --- | --- | --- |
+
+## Summary
+
+<!-- register:begin — generated by bin/register; edit nothing between the markers -->
+<!-- register:end -->
+EOF
+    then printf '  add   %-16s %s\n' "$(sect_of "docs/official/DEVIATIONS.md")" "docs/official/DEVIATIONS.md"; added=$((added+1))
+    else printf '  FAIL  %-16s %s (write failed — permissions/disk?)\n' "$(sect_of "docs/official/DEVIATIONS.md")" "docs/official/DEVIATIONS.md"; wfail=$((wfail+1)); fi
+  fi
+fi
+
+# --- version stamp ---
+# An EXISTING stamp is CORRECTED, not skipped, when it records a different or unknown
+# archetype (B31): the operator's explicit --authored/--vendor-derived is the truth of
+# record, and a '(unknown)' stamp (truncated, or minted by a stampless sync) was
+# previously permanent — verify skipped every archetype check on it, silently, forever.
+STAMP="$TARGET/.repo-standard-version"
+if ! exists "$STAMP"; then
+  if [ $((missing+wfail+blocked)) -gt 0 ]; then
+    # The stamp records a COMPLETE scaffold at $VERSION (B109, B106's sibling in sync):
+    # writing it over ???/FAIL/BLCK lines claims machinery this run never delivered.
+    printf '  skip  %-16s %s (stamp WITHHELD — %s missing/failed/blocked item(s) above; complete the scaffold, then re-run)\n' \
+      "$(sect_of .repo-standard-version)" ".repo-standard-version" "$((missing+wfail+blocked))"
+    skipped=$((skipped+1))
+  elif parents_ok "$STAMP"; then
+    # Guarded write (B124): a failed redirect under set -e was a silent mid-run death.
+    if printf 'repo-standard %s stamped %s (%s)\n' "$VERSION" "$(date +%F)" "$ARCH" 2>/dev/null >"$STAMP"; then
+      printf '  add   %-16s %s\n' "$(sect_of ".repo-standard-version")" ".repo-standard-version"; added=$((added+1))
+    else
+      printf '  FAIL  %-16s %s (write failed — permissions/disk?)\n' "$(sect_of ".repo-standard-version")" ".repo-standard-version"; wfail=$((wfail+1))
+    fi
+  else
+    printf '  skip  %-16s %s (a parent path component is a symlink or not a directory)\n' "$(sect_of ".repo-standard-version")" ".repo-standard-version"
+    skipped=$((skipped+1))
+  fi
+elif [ -L "$STAMP" ] || [ ! -f "$STAMP" ]; then
+  # Same destination discipline as the machinery (B59/B73's class).
+  printf '  BLCK  %-16s %s (destination is a %s — clear it yourself, then re-run)\n' \
+    "$(sect_of .repo-standard-version)" ".repo-standard-version" "$( [ -L "$STAMP" ] && echo symlink || echo "non-regular file" )"
+  blocked=$((blocked+1))
+elif [ ! -r "$STAMP" ]; then
+  # An unreadable stamp can be neither JUDGED nor safely corrected: overwriting it
+  # blind would destroy the recorded version (B107's shape), and dying at the awk
+  # below under set -e printed nothing at all (B115, B102's class).
+  printf '  BLCK  %-16s %s (exists but cannot be read — fix permissions, then re-run)\n' "$(sect_of ".repo-standard-version")" ".repo-standard-version"
+  blocked=$((blocked+1))
+else
+  stampline="$(head -n 1 "$STAMP" 2>/dev/null || true)"
+  # The repair gate must not accept an AMBIGUOUS line (B117): a bare grep for "($ARCH)"
+  # matches a both-archetype stamp whenever the flag names either marker, so init
+  # skipped the very repair verify's both-markers WARN prescribes — a dead-end loop
+  # that could never sign off under --strict.
+  needfix=0
+  case "$stampline" in
+    *"(authored)"*"(vendor-derived)"*|*"(vendor-derived)"*"(authored)"*) needfix=1 ;;
+    *"($ARCH)"*) ;;
+    *) needfix=1 ;;
+  esac
+  if [ "$needfix" = 0 ]; then
+    printf '  skip  %-16s %s (already stamped %s)\n' "$(sect_of ".repo-standard-version")" ".repo-standard-version" "$ARCH"; skipped=$((skipped+1))
+  else
+    # Correct the ARCHETYPE while PRESERVING the recorded sync version: advancing the
+    # version here would claim a sync that never happened — and sync's downgrade guard
+    # would then refuse the very repair run that could deliver it. (Line 1 is the stamp
+    # of record — the same line sync and verify read.)
+    oldver="$(awk 'NR==1{print $2}' "$STAMP" 2>/dev/null || true)"
+    case "$oldver" in [0-9]*.[0-9]*) ;; *) oldver="$VERSION" ;; esac
+    stmp="$STAMP.tmp.$$"
+    printf 'repo-standard %s stamped %s (%s)\n' "$oldver" "$(date +%F)" "$ARCH" 2>/dev/null >"$stmp" \
+      && mv "$stmp" "$STAMP" 2>/dev/null || { rm -f "$stmp" 2>/dev/null || true; err "rewriting .repo-standard-version failed"; }
+    printf '  fix   %s (now records %s; version %s preserved)\n' ".repo-standard-version" "$ARCH" "$oldver"
+    overwritten=$((overwritten+1))
+  fi
+fi
+
+# generate the initial tracker view so the repo is in sync from the first commit.
+# Same symlink discipline as every other write — and an EXECUTION guard on top: a
+# symlinked bin/ must not lead init to RUN a foreign `track` through the link, and a
+# symlinked docs/ must not receive tracker.html through one (B73's render variant).
+# The gen line is printed only when the file actually exists, not on bare exit 0 — and it
+# counts toward "added" (B145): the Done summary said "12 added" over an adoption commit of
+# 13 files, and the uncounted file was this rendered page (the stamp was always counted).
+# Renders ONLY when tracker.html is ABSENT (B56/B57): a pre-existing page — even a
+# hand-kept one — was silently overwritten with no --force, and a no-op re-run
+# rewrote its mtime, which the Stop hook read as work-without-a-handoff. Refreshing
+# an existing page is `track render`'s job (and sync's, when the renderer changes).
+if [ -e "$TARGET/docs/dev-notes/tracker.html" ] || [ -L "$TARGET/docs/dev-notes/tracker.html" ]; then
+  printf '  skip  %-16s %s (exists — init renders only a missing page; run track render to refresh it)\n' "$(sect_of "docs/dev-notes/tracker.html")" "docs/dev-notes/tracker.html"
+  skipped=$((skipped+1))
+elif [ -x "$TARGET/bin/track" ] && [ ! -L "$TARGET/bin/track" ] && parents_ok "$TARGET/bin/track" \
+   && [ -f "$TARGET/docs/dev-notes/tracker.md" ] && [ ! -L "$TARGET/docs/dev-notes/tracker.md" ] \
+   && parents_ok "$TARGET/docs/dev-notes/tracker.md"; then
+  TRACKER_FILE="$TARGET/docs/dev-notes/tracker.md" "$TARGET/bin/track" render >/dev/null 2>&1 \
+    && [ -f "$TARGET/docs/dev-notes/tracker.html" ] \
+    && { printf '  gen   %-16s %s\n' "$(sect_of "docs/dev-notes/tracker.html")" "docs/dev-notes/tracker.html"; added=$((added+1)); } || true
+fi
+
+# The register's page, on the same terms as tracker.html above: only when absent, never
+# through a symlink, and counted. A register without the marker pair (one that predates
+# the entry form) is not yet migrated, so render refuses and no page appears — by design.
+if [ "$ARCH" = vendor-derived ]; then
+  if [ -e "$TARGET/docs/official/DEVIATIONS.html" ] || [ -L "$TARGET/docs/official/DEVIATIONS.html" ]; then
+    printf '  skip  %-16s %s (exists — init renders only a missing page; run bin/register render to refresh it)\n' "$(sect_of "docs/official/DEVIATIONS.html")" "docs/official/DEVIATIONS.html"
+    skipped=$((skipped+1))
+  elif [ -x "$TARGET/bin/register" ] && [ ! -L "$TARGET/bin/register" ] && parents_ok "$TARGET/bin/register" \
+     && [ -f "$TARGET/docs/official/DEVIATIONS.md" ] && [ ! -L "$TARGET/docs/official/DEVIATIONS.md" ] \
+     && parents_ok "$TARGET/docs/official/DEVIATIONS.md"; then
+    REGISTER_FILE="$TARGET/docs/official/DEVIATIONS.md" "$TARGET/bin/register" render >/dev/null 2>&1 \
+      && [ -f "$TARGET/docs/official/DEVIATIONS.html" ] \
+      && { printf '  gen   %-16s %s\n' "$(sect_of "docs/official/DEVIATIONS.html")" "docs/official/DEVIATIONS.html"; added=$((added+1)); } || true
+  fi
+fi
+
+printf '\nDone: %s added, %s overwritten, %s skipped, %s blocked, %s failed, %s missing from template.\n\n' \
+  "$added" "$overwritten" "$skipped" "$blocked" "$wfail" "$missing"
+printf 'Next:\n'; [ -z "$cdp" ] || printf '  cd %s\n' "$(shq "$tgt_abs")"
+# `git init` is advice for a NON-repo only (B139): telling an existing repo to run it read
+# as a wrong instruction, not a conditional one.
+git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1 || printf '  git init -b main\n'
+cat <<EOF
+  git config core.hooksPath .githooks   # [6] enable the tracker staleness guard
+  git config tag.sort version:refname   # [8] sort tags as versions, not strings (v0.3.10 after v0.3.9)
+EOF
+if [ "$mach_skipped" -gt 0 ]; then
+  # sync lives in the standard's checkout, not in the target — print a command that
+  # actually runs after the `cd` above ($SELF is absolute).
+  cat <<EOF
+  "$SELF/sync" .                       # $mach_skipped machinery file(s) already existed — review the drift
+EOF
+fi
+# The adoption commit and the --strict sign-off (F15): the scaffold-only refusal above always
+# printed both, while this success path — the one every migration takes — stopped at "fill
+# in README.md", and seven rehearsal logs show the operator supplying the real next steps by
+# hand. Same commit text as that refusal.
+cat <<EOF
+  git add -A && git commit -m 'adopt repo-standard $VERSION ($ARCH)'   # the adoption commit: init's output only
+EOF
+if [ "$readme_kept" = 1 ]; then
+  printf '  # [1] README.md kept — add its Status / where to resume section, then track work:\n'
+else
+  printf '  # [1] fill in README.md (the three front-door sections), then track work:\n'
+fi
+cat <<EOF
+  ./bin/track add feature "first thing"   # [5]
+  $(shq "$SELF/verify") . --strict   # sign-off, once the front door and the tracker are in
+EOF
+# Every not-delivered state exits 1 (B109): blocked destinations, failed writes, AND
+# template files this checkout simply does not have — the old exit judged only BLCK,
+# so an incomplete checkout scaffolded a hook-less repo and still reported success.
+if [ $((blocked+wfail+missing)) -gt 0 ]; then
+  printf 'init: %s blocked destination(s), %s failed write(s), %s template file(s) missing — see BLCK/FAIL/??? lines above.\n' \
+    "$blocked" "$wfail" "$missing" >&2
+  exit 1
+fi

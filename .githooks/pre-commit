@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Managed by repo-standard: read REPO-STANDARD.md at the repo root before editing, moving or
+# deleting this file. sync replaces it from the standard.
+# pre-commit — refuse to commit a source whose generated output is stale: a tracker.md and
+# its tracker.html (bin/track), and, in a vendor-derived repo, docs/official/DEVIATIONS.md
+# and its generated parts — the summary block and DEVIATIONS.html (bin/register, F17).
+# The tracker block's commit-boundary guarantee: it catches hand-edits to Name/Description
+# that the CLI auto-render doesn't see, AND the far more common slip of staging tracker.md
+# while leaving the regenerated tracker.html unstaged. Respects the commit gate — it
+# blocks and tells you what to run; it does not silently rewrite your commit.
+#
+# Checks the INDEX, not the working tree. Rendering the worktree would compare files
+# that are both up to date while the *commit* carries a stale pair — that state is
+# then invisible to `verify` too, and only shows up in a fresh clone. So: extract the
+# staged tracker.md + staged tracker.html, render the former, compare to the latter.
+# (`track render` derives the page title from tracker.md's own H1, so rendering the
+# extracted copy under /tmp is byte-identical to rendering it in place.)
+#
+# Enable once per clone (from repo root):  git config core.hooksPath .githooks
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$root" || exit 0
+
+# Only act when a tracker source — or the register — is part of this commit
+# (added/copied/modified/renamed).
+# -z: names arrive RAW, NUL-delimited — a C-quoted line (non-ASCII, quotes, backslashes
+# in the path) would slip past a line-wise grep and the commit would pass UNCHECKED (B40).
+staged=() reg=0
+while IFS= read -r -d '' p; do
+  case "$p" in tracker.md|*/tracker.md) staged+=("$p") ;; esac
+  [ "$p" = docs/official/DEVIATIONS.md ] && reg=1
+done < <(git diff --cached --name-only -z --diff-filter=ACMR 2>/dev/null)
+[ "${#staged[@]}" -gt 0 ] || [ "$reg" = 1 ] || exit 0
+
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+rc=0
+
+# ── the tracker ───────────────────────────────────────────────────────────────────────
+if [ "${#staged[@]}" -gt 0 ]; then
+
+# A clone with core.symlinks=false (Windows default) materializes a committed symlink
+# as a text file holding the link target — bin/track then "exists" but cannot run, and
+# the fail-open below would silently disarm the guard on exactly the clone least able
+# to notice (B67). That one state fails CLOSED, with the remedy named.
+if [ -f ./bin/track ] && [ ! -L ./bin/track ] \
+   && git ls-files -s -- bin/track 2>/dev/null | grep -q '^120000'; then
+  echo "pre-commit: bin/track is a materialized symlink (this clone has core.symlinks=false)." >&2
+  echo "  the tracker guard cannot run here. Set 'git config core.symlinks true' and" >&2
+  echo "  'git checkout -- bin/track' (needs symlink-capable filesystem), then retry." >&2
+  exit 1
+fi
+
+if [ ! -x ./bin/track ]; then
+  echo "pre-commit: ./bin/track missing or not executable — skipping the tracker check." >&2
+  echo "  run 'sync' from the standard to restore it; the tracker is not checked." >&2
+  staged=()   # skip the tracker loop; the register block below still runs
+fi
+
+# Remedies below are printed as ABSOLUTE, per-file commands (D12/B20): the repo-root-
+# relative './bin/track render' failed from the subdirectory the user committed in, and
+# rendered only the CANONICAL tracker while the guard checks every staged one. Every
+# interpolated path is shell-quoted with printf %q and `add` gets `--`, so the printed
+# line survives dash-leading dirs, quotes, spaces — and cannot smuggle $(…) into the
+# operator's paste.
+for md in "${staged[@]}"; do
+  html="$(dirname -- "$md")/tracker.html"
+  mkdir -p "$tmp/$(dirname -- "$md")"
+  qmd="$(printf '%q' "$root/$md")"; qtrack="$(printf '%q' "$root/bin/track")"
+  qroot="$(printf '%q' "$root")"; qhtml="$(printf '%q' "$html")"; qmdrel="$(printf '%q' "$md")"
+
+  git show ":$md" > "$tmp/$md" 2>/dev/null || continue
+  if ! git show ":$html" > "$tmp/$html" 2>/dev/null; then
+    echo "commit blocked: $html is not staged (and not in the index)" >&2
+    echo "  fix (works from anywhere):" >&2
+    echo "    TRACKER_FILE=$qmd $qtrack render && git -C $qroot add -- $qhtml" >&2
+    echo "  then commit again." >&2
+    rc=1; continue
+  fi
+
+  # Capture --check's output instead of discarding it (B85): nonzero no longer means
+  # only staleness — the raw-0x1f guard refuses too, and mapping every failure to
+  # "stale" prescribed a render-and-add remedy that itself refuses on the same input.
+  # Discriminates on track's STALE token (string coupling: track's stale message
+  # carries the matching keep-it comment). Any other refusal is surfaced with the
+  # mktemp prefix rewritten to the real path — $tmp is gone the moment the hook exits.
+  if ! msg="$(TRACKER_FILE="$tmp/$md" ./bin/track render --check 2>&1)"; then
+    case "$msg" in
+      *STALE*) : ;;  # genuine staleness — fall through to the diagnosis below
+      *) printf 'commit blocked: %s\n' "${msg//"$tmp"\//}" >&2
+         echo "  (the check ran on the STAGED $md; fix the worktree file, then re-stage)" >&2
+         rc=1; continue ;;
+    esac
+    echo "commit blocked: $html is stale relative to $md AS STAGED (the check compares the staged pair, not your worktree)" >&2
+    echo "  fix (works from anywhere):" >&2
+    echo "    TRACKER_FILE=$qmd $qtrack render && git -C $qroot add -- $qhtml" >&2
+    echo "  if $md is partially staged, or was edited after staging (any track command does this)," >&2
+    echo "  the render above reflects your WORKTREE tracker.md and the check will block again —" >&2
+    echo "  then also: git -C $qroot add -- $qmdrel   (or unstage both and re-stage them together)." >&2
+    rc=1
+  fi
+done
+fi
+
+# ── the register (vendor-derived repos) ───────────────────────────────────────────────
+# Same contract as the tracker block: the STAGED register and the STAGED DEVIATIONS.html,
+# checked by `register check` on copies in $tmp. Its Source paths resolve against the
+# WORKTREE register's folder (REGISTER_BASE): from $tmp, `../reference/…` points nowhere,
+# and the files a reader's links open are the worktree's. The page's citation block is not
+# compared (spec Q5): a commit that only moves a citation never blocks here. A register
+# not yet in the entry form (no marker) passes: `check` says so and exits 0. An authored
+# repo never stages docs/official/DEVIATIONS.md, so this block never runs there.
+if [ "$reg" = 1 ]; then
+  md=docs/official/DEVIATIONS.md html=docs/official/DEVIATIONS.html
+  if [ ! -f ./bin/register ] || [ ! -x ./bin/register ]; then
+    echo "pre-commit: ./bin/register missing or not executable — skipping the register check." >&2
+    echo "  run 'sync' from the standard to restore it; commit allowed." >&2
+  elif mkdir -p "$tmp/docs/official" && git show ":$md" > "$tmp/$md" 2>/dev/null; then
+    hstaged=1; git show ":$html" > "$tmp/$html" 2>/dev/null || { hstaged=0; rm -f "$tmp/$html"; }
+    qmd="$(printf '%q' "$root/$md")"; qreg="$(printf '%q' "$root/bin/register")"
+    qroot="$(printf '%q' "$root")"
+    if ! msg="$(REGISTER_FILE="$tmp/$md" REGISTER_BASE="$root/docs/official" ./bin/register check 2>&1)"; then
+      case "$msg" in
+        *STALE*)
+          # The register's STALE token, as for track: staleness, not invalid input.
+          if [ "$hstaged" = 0 ]; then
+            echo "commit blocked: $html is not staged (and not in the index)" >&2
+          else
+            echo "commit blocked: the summary block or $html is stale relative to $md AS STAGED (the check compares the staged pair, not your worktree)" >&2
+          fi
+          echo "  fix (works from anywhere; render rewrites the summary block, so both files are re-added):" >&2
+          echo "    REGISTER_FILE=$qmd $qreg render && git -C $qroot add -- $md $html" >&2
+          echo "  if $md is partially staged, the render above reflects your WORKTREE register;" >&2
+          echo "  stage the whole file (or unstage both and re-stage them together)." >&2
+          rc=1 ;;
+        *)
+          printf 'commit blocked: %s\n' "${msg//"$tmp"\//}" >&2
+          echo "  (the check ran on the STAGED $md; fix the worktree file, then re-stage)" >&2
+          rc=1 ;;
+      esac
+    fi
+  fi
+fi
+
+exit $rc
+# Variant if you'd rather it fix + stage automatically instead of blocking — note this
+# re-renders from the WORKTREE, so only use it if you always commit the whole file:
+#   ./bin/track render && git add "$(git rev-parse --show-toplevel)"/**/tracker.html

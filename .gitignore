@@ -1,0 +1,25 @@
+# track's atomic-write temp files (auto-removed; ignored as a safety net). Scoped to
+# the tracker pair's own names (B119): a repo-wide *.tmp.* / *.data.* glob silently
+# untracked legitimate files like app.data.json or video.tmp.mp4.
+tracker.md.tmp.*
+tracker.html.tmp.*
+tracker.md.data.*
+tracker-hwm.tmp.*
+
+# OS / editor cruft
+.DS_Store
+*.swp
+
+# Claude Code worktrees (live parallel-session checkouts — never commit them)
+.claude/worktrees/
+
+# Claude Code personal settings — machine-local, never committed. The glob also covers
+# the harness's atomic-write temp siblings (settings.local.json.tmp.<pid>.<hex>), which
+# otherwise show as untracked noise and can race `git add -A` into an abort (B128).
+.claude/settings.local.json*
+
+# Claude Code personal instructions. CLAUDE.local.md loads after CLAUDE.md in every session and
+# is meant to stay personal (the Claude Code docs say to gitignore it; nothing does so on its
+# own). Unanchored on purpose: Claude Code also reads a CLAUDE.local.md in any subdirectory,
+# and a root-only /CLAUDE.local.md would leave those one `git add -A` away from history.
+CLAUDE.local.md

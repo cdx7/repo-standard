@@ -1,0 +1,10 @@
+# Everything this repo ships is LF-authored shell and markdown. Never let checkout or
+# check-in translate line endings: a core.autocrlf=true clone otherwise materializes
+# every tool and hook with CRLF and the whole toolchain exits 127 on a '\r' shebang
+# (B68). text=auto normalizes to LF in the index; eol=lf pins LF in every worktree.
+* text=auto eol=lf
+
+# Explicit pin for track's tracker-hwm sidecar (B47): a CRLF checkout zeroes its
+# recorded high-water marks and re-mints deleted IDs. Redundant under the global rule
+# above today, but kept unpathed and explicit so narrowing that rule can't drop it.
+tracker-hwm text eol=lf

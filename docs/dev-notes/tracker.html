@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tracker — repo-standard (public copy)</title>
+<style>
+  *{box-sizing:border-box}
+  :root{
+    --bg:#eef0f3;--surface:#fff;--surface-2:#e7eaef;--raised:#f6f8fa;--border:#d5dae1;
+    --border-strong:#c2c9d3;--text:#1a2030;--text-dim:#59626f;--text-faint:#8b93a1;
+    --accent:#2f6f9f;--accent-ink:#1c5680;--accent-weak:#e3eef6;
+    --shadow:0 1px 2px rgba(20,30,45,.06),0 6px 20px rgba(20,30,45,.05);
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#101319;--surface:#191d25;--surface-2:#212631;--raised:#232a36;--border:#2f3743;
+    --border-strong:#3c4552;--text:#e7ebf1;--text-dim:#9aa4b2;--text-faint:#6b7686;
+    --accent:#6fb7e8;--accent-ink:#a7d3f2;--accent-weak:#182634;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);}}
+  :root[data-theme="light"]{--bg:#eef0f3;--surface:#fff;--surface-2:#e7eaef;--raised:#f6f8fa;--border:#d5dae1;--border-strong:#c2c9d3;--text:#1a2030;--text-dim:#59626f;--text-faint:#8b93a1;--accent:#2f6f9f;--accent-ink:#1c5680;--accent-weak:#e3eef6;--shadow:0 1px 2px rgba(20,30,45,.06),0 6px 20px rgba(20,30,45,.05)}
+  :root[data-theme="dark"]{--bg:#101319;--surface:#191d25;--surface-2:#212631;--raised:#232a36;--border:#2f3743;--border-strong:#3c4552;--text:#e7ebf1;--text-dim:#9aa4b2;--text-faint:#6b7686;--accent:#6fb7e8;--accent-ink:#a7d3f2;--accent-weak:#182634;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28)}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:26px 20px 64px}
+  .head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 14px;margin-bottom:6px}
+  .head h1{font-size:20px;font-weight:650;letter-spacing:-.01em;margin:0}
+  .head .path{font-family:var(--mono);font-size:15px;color:var(--text-dim);font-weight:500}
+  .gen{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-faint);border:1px solid var(--border);border-radius:999px;padding:3px 9px}
+  .sub{color:var(--text-dim);font-size:12.5px;margin:6px 0 0;width:100%}
+  .sub code{font-family:var(--mono);background:var(--surface-2);padding:1px 5px;border-radius:5px}
+  .toolbar{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);padding:12px 0 10px;margin:14px 0 4px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;border-bottom:1px solid var(--border)}
+  .search{flex:1 1 220px;display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 11px;box-shadow:var(--shadow)}
+  .search:focus-within{border-color:var(--accent)}
+  .search svg{flex:none;opacity:.55}
+  .search input{border:0;outline:0;background:transparent;color:var(--text);font-family:var(--sans);font-size:13.5px;width:100%}
+  .sortbox{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-dim)}
+  .sortbox select{font-family:var(--sans);font-size:13px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 9px}
+  .btn{font-family:var(--mono);font-size:13px;color:var(--text);cursor:pointer;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+  .btn:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .count{font-size:12px;color:var(--text-faint);font-variant-numeric:tabular-nums;margin-left:auto}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 4px;align-items:center}
+  .chips .lbl{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint);margin-right:2px}
+  .chip{display:inline-flex;align-items:center;gap:7px;cursor:pointer;user-select:none;background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:4px 11px 4px 8px;font-size:12.5px;color:var(--text)}
+  .chip:hover{border-color:var(--border-strong)}
+  .chip .dot{width:8px;height:8px;border-radius:50%;background:var(--sc);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--sc) 20%,transparent)}
+  .chip .n{font-variant-numeric:tabular-nums;color:var(--text-dim);font-family:var(--mono);font-size:11.5px}
+  .chip.on{background:color-mix(in srgb,var(--sc) 14%,var(--surface));border-color:var(--sc)}
+  .chip.on .n{color:var(--text)}
+  .section{margin-top:18px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden}
+  .sec-head{display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;padding:12px 16px;background:var(--raised);border-bottom:1px solid var(--border)}
+  .sec-head:hover{background:var(--surface-2)}
+  .sec-head .chev{transition:transform .15s;color:var(--text-faint);font-size:11px}
+  .section.collapsed .chev{transform:rotate(-90deg)}
+  .section.collapsed .sec-body{display:none}
+  .sec-head h2{margin:0;font-size:14.5px;font-weight:620}
+  .sec-head .sec-n{font-family:var(--mono);font-size:11.5px;color:var(--text-faint);font-variant-numeric:tabular-nums;margin-left:auto}
+  .sec-idp{font-family:var(--mono);font-size:11px;color:var(--accent-ink);background:var(--accent-weak);border:1px solid var(--border);border-radius:6px;padding:1px 6px}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:11px 14px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--raised) 55%,var(--surface))}
+  .flow .flbl{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint);margin-right:4px}
+  .fchip{display:inline-flex;align-items:center;gap:6px;font-family:inherit;font-size:11.5px;padding:2px 8px 2px 6px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-dim);white-space:nowrap;cursor:pointer}
+  .fchip:hover{border-color:var(--border-strong)}
+  .fchip.has{color:var(--text);border-color:color-mix(in srgb,var(--sc) 48%,var(--border))}
+  .fchip.muted{opacity:.72}
+  .fchip.on{background:color-mix(in srgb,var(--sc) 14%,var(--surface));border-color:var(--sc);color:var(--text);opacity:1}
+  .fclear{font-size:11px;padding:2px 8px;margin-left:4px}
+  .fdot{width:7px;height:7px;border-radius:50%;background:var(--sc);flex:none}
+  .fchip.has .fdot{box-shadow:0 0 0 3px color-mix(in srgb,var(--sc) 22%,transparent)}
+  .fn{font-family:var(--mono);font-size:10.5px;background:color-mix(in srgb,var(--sc) 22%,var(--surface));border-radius:999px;padding:0 5px}
+  .farr{color:var(--text-faint);font-size:11px}
+  .fsep{color:var(--text-faint);margin:0 3px;font-family:var(--mono)}
+  table{width:100%;border-collapse:collapse}
+  thead th{text-align:left;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-faint);font-weight:600;padding:9px 14px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap}
+  thead th:hover{color:var(--accent-ink)}
+  thead th .ar{opacity:0;font-size:9px}
+  thead th.act .ar{opacity:1}
+  th.c-id,td.c-id{width:118px}
+  th.c-st,td.c-st{width:148px}
+  th.c-cr,td.c-cr,th.c-ch,td.c-ch{width:112px}
+  tbody tr.row{border-bottom:1px solid var(--border);cursor:pointer}
+  tbody tr.row:last-child{border-bottom:0}
+  tbody tr.row:hover{background:var(--raised)}
+  tbody td{padding:9px 14px;vertical-align:top}
+  td.c-id .idv{font-family:var(--mono);font-size:12.5px}
+  td.c-id .depth{color:var(--text-faint)}
+  .name{display:flex;align-items:flex-start;gap:8px}
+  .name .exp{color:var(--text-faint);font-size:10px;margin-top:4px;transition:transform .15s;flex:none}
+  tr.open .name .exp{transform:rotate(90deg);color:var(--accent)}
+  .name .has-detail{color:var(--accent-ink)}
+  td.c-cr,td.c-ch{font-family:var(--mono);font-size:12px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:2px 9px 2px 7px;border-radius:999px;background:color-mix(in srgb,var(--sc) 13%,transparent);color:var(--text);border:1px solid color-mix(in srgb,var(--sc) 34%,transparent);white-space:nowrap}
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--sc);flex:none}
+  .pill .em{font-size:11px}
+  tr.detail td{padding:0 14px}
+  tr.detail .box{margin:0 0 12px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;font-size:13px;color:var(--text-dim);line-height:1.6}
+  tr.detail .box .none{color:var(--text-faint);font-style:italic}
+  tr.detail .meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:9px;font-size:11.5px;color:var(--text-faint);font-family:var(--mono)}
+  tr.detail .meta b{color:var(--text-dim);font-weight:500}
+  .empty{padding:26px 16px;text-align:center;color:var(--text-faint);font-size:13px}
+  footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--border);color:var(--text-faint);font-size:12px;line-height:1.6}
+  footer code{font-family:var(--mono);background:var(--surface-2);padding:1px 5px;border-radius:5px}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+  @media (max-width:640px){th.c-cr,td.c-cr,th.c-ch,td.c-ch{display:none}.wrap{padding:18px 14px 52px}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="head">
+    <h1>tracker <span class="path">· repo-standard (public copy)</span></h1>
+    <span class="gen">generated by · track render</span>
+    <p class="sub">A view of <code>tracker.md</code>. Sort a column, filter by status (the top chips filter every section; a section's flow chips filter just that section), click a row for detail. Editing goes through the <code>track</code> CLI — this page is read-only and regenerated by <code>track render</code>.</p>
+  </header>
+
+  <div class="chips" id="chips"></div>
+  <div class="toolbar">
+    <label class="search">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="q" type="search" placeholder="Filter by id, name, or detail…" autocomplete="off" aria-label="Filter rows">
+    </label>
+    <div class="sortbox"><span>Sort</span>
+      <select id="sortKey" aria-label="Sort column">
+        <option value="id">ID</option><option value="status">Status</option>
+        <option value="created">Created</option><option value="changed">Status Changed</option>
+        <option value="name">Name</option>
+      </select>
+      <button class="btn" id="dir" aria-label="Sort direction">↑ asc</button>
+    </div>
+    <button class="btn" id="expandAll">Expand all</button>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div id="sections"></div>
+  <footer id="foot"></footer>
+</div>
+
+<script>
+const ROWS = [
+];
+const EMOJI = {"submitted":"📥","researching":"🔍","open":"⬜","in-progress":"🔄","blocked":"⛔","testing":"🧪","done":"✅","cnr":"🤷","dropped":"🗑️","parked":"⏸️",};
+const MODEL = {
+  "bug":{allowed:["submitted","researching","open","in-progress","testing","done","blocked","parked","dropped","cnr",],flow:["submitted","researching","open","in-progress","testing","done",],def:"submitted"},
+  "feature":{allowed:["submitted","researching","open","in-progress","testing","done","blocked","parked","dropped",],flow:["submitted","researching","open","in-progress","testing","done",],def:"open"},
+  "doc":{allowed:["open","in-progress","done","blocked","parked","dropped",],flow:["open","in-progress","done",],def:"open"},
+  "testing":{allowed:["open","in-progress","done","blocked","parked","dropped",],flow:["open","in-progress","done",],def:"open"},
+};
+</script>
+
+<script>
+  const COLOR={submitted:"#8b5cf6",researching:"#06b6d4",open:"#8a94a6","in-progress":"#3b82f6",blocked:"#ef4444",testing:"#f59e0b",done:"#22c55e",cnr:"#f97316",dropped:"#6b7280",parked:"#64748b"};
+  const ORDER=["submitted","researching","open","in-progress","blocked","testing","done","cnr","dropped","parked"];
+  const CATS=[{key:"bug",label:"Bugs",idp:"B##"},{key:"feature",label:"Features",idp:"F##"},{key:"doc",label:"Documentation",idp:"D##"},{key:"testing",label:"Testing",idp:"T##"}];
+  const state={q:"",statuses:new Set(),secStatuses:{},sortKey:"id",dir:1,expanded:new Set(),collapsed:new Set()};
+  const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+  function natCmp(a,b){const ax=String(a).match(/(\d+|\D+)/g)||[],bx=String(b).match(/(\d+|\D+)/g)||[];const n=Math.max(ax.length,bx.length);for(let i=0;i<n;i++){const p=ax[i],q=bx[i];if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^\d+$/.test(p),qn=/^\d+$/.test(q);if(pn&&qn){const d=parseInt(p)-parseInt(q);if(d)return d}else if(p!==q)return p<q?-1:1}return 0}
+  const oi=s=>{const i=ORDER.indexOf(s);return i<0?ORDER.length:i};   // unknown statuses sort LAST, not first (B82)
+  function cmp(a,b){let r;if(state.sortKey==="id")r=natCmp(a.id,b.id);else if(state.sortKey==="status")r=(oi(a.status)-oi(b.status))||natCmp(a.id,b.id);else if(state.sortKey==="name")r=a.name.toLowerCase()<b.name.toLowerCase()?-1:a.name.toLowerCase()>b.name.toLowerCase()?1:0;else{const ka=a[state.sortKey]||"",kb=b[state.sortKey]||"";r=(ka<kb?-1:ka>kb?1:0)||natCmp(a.id,b.id)}return r*state.dir}
+  function match(r){if(state.statuses.size&&!state.statuses.has(r.status))return false;const ss=state.secStatuses[r.cat];if(ss&&ss.size&&!ss.has(r.status))return false;if(state.q){const q=state.q.toLowerCase();if(!(r.id.toLowerCase().includes(q)||r.name.toLowerCase().includes(q)||(r.desc||"").toLowerCase().includes(q)))return false}return true}
+  const depth=id=>(id.match(/\./g)||[]).length;
+  function ancestors(id){const p=[];let s=id;while(s.includes(".")){s=s.slice(0,s.lastIndexOf("."));p.push(s)}return p}
+  const pill=st=>`<span class="pill" style="--sc:${COLOR[st]||'#888'}"><span class="dot"></span><span class="em">${EMOJI[st]||''}</span>${esc(st)}</span>`;
+
+  function flowFor(key){
+    const m=MODEL[key];if(!m)return"";
+    const rows=ROWS.filter(r=>r.cat===key);const cnt=s=>rows.filter(r=>r.status===s).length;
+    const ss=state.secStatuses[key];
+    // data-st is ATTRIBUTE context (B123): an unknown, hand-mangled status word rides
+    // into it raw — esc() it like every other interpolation, or a quote breaks out.
+    const chip=(s,muted)=>{const n=cnt(s),on=!!ss&&ss.has(s);return `<button class="fchip${muted?' muted':''}${n?' has':''}${on?' on':''}" style="--sc:${COLOR[s]||'#888'}" data-cat="${esc(key)}" data-st="${esc(s)}" aria-pressed="${on}"><span class="fdot"></span>${EMOJI[s]||''} ${esc(s)}${n?`<span class="fn">${n}</span>`:''}</button>`};
+    const flow=m.flow.map(s=>chip(s,false)).join(`<span class="farr">→</span>`);
+    // Side states beyond the happy path, PLUS any status word the model doesn't know
+    // (B82) — hand-mangled rows stay per-section filterable instead of invisible.
+    const side=m.allowed.filter(s=>!m.flow.includes(s))
+      .concat([...new Set(rows.map(r=>r.status))].filter(s=>!m.allowed.includes(s)).sort());
+    const sideHtml=side.length?`<span class="fsep">+</span>`+side.map(s=>chip(s,true)).join(""):"";
+    const clear=(ss&&ss.size)?`<button class="btn fclear" data-cat="${key}">clear</button>`:"";
+    return `<div class="flow"><span class="flbl">flow</span>${flow}${sideHtml}${clear}</div>`;
+  }
+
+  function renderChips(){
+    const counts={};ROWS.forEach(r=>counts[r.status]=(counts[r.status]||0)+1);
+    // Unknown/hand-mangled status words get chips too, after the known ones (B82):
+    // they used to be unfilterable, uncounted, and invisible in the strip.
+    const present=ORDER.filter(k=>counts[k]).concat(Object.keys(counts).filter(k=>!ORDER.includes(k)).sort());
+    const el=document.getElementById("chips");
+    el.innerHTML='<span class="lbl">Status</span>'+present.map(k=>{const on=state.statuses.has(k);
+      return `<button class="chip ${on?'on':''}" style="--sc:${COLOR[k]||'#888'}" data-st="${esc(k)}" aria-pressed="${on}"><span class="dot"></span>${EMOJI[k]||''} ${esc(k)} <span class="n">${counts[k]}</span></button>`}).join("")
+      +(state.statuses.size?`<button class="btn" id="clearSt" style="margin-left:4px">clear</button>`:"");
+    el.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{const k=c.dataset.st;state.statuses.has(k)?state.statuses.delete(k):state.statuses.add(k);render()});
+    const cl=document.getElementById("clearSt");if(cl)cl.onclick=()=>{state.statuses.clear();render()};
+  }
+
+  function renderSections(){
+    const root=document.getElementById("sections");let shown=0,html="";
+    for(const cat of CATS){
+      const all=ROWS.filter(r=>r.cat===cat.key);const rows=all.filter(match).sort(cmp);shown+=rows.length;
+      const collapsed=state.collapsed.has(cat.key);const cols=["id","status","created","changed","name"];
+      const map={id:"ID",status:"Status",created:"Created",changed:"Status Changed",name:"Name"};
+      const cls={id:"c-id",status:"c-st",created:"c-cr",changed:"c-ch",name:"c-name"};
+      const th=c=>{const act=state.sortKey===c;return `<th class="${cls[c]} ${act?'act':''}" data-k="${c}">${map[c]}<span class="ar">${act?(state.dir>0?'▲':'▼'):''}</span></th>`};
+      let body;
+      // An empty SECTION and a filtered-out section are different facts (B92): a
+      // pristine page must not blame "the current filter" it doesn't have.
+      if(rows.length===0)body=`<tr><td colspan="5"><div class="empty">${all.length===0?`No ${esc(cat.label.toLowerCase())} recorded yet.`:`No ${esc(cat.label.toLowerCase())} match the current filter.`}</div></td></tr>`;
+      else body=rows.map(r=>{const open=state.expanded.has(r.id),d=depth(r.id),hasDetail=!!r.desc||d>0;
+        const det=open?`<tr class="detail"><td colspan="5"><div class="box">${r.desc?esc(r.desc):'<span class="none">No description recorded.</span>'}<div class="meta"><span><b>id</b> ${esc(r.id)}</span>${d>0?`<span><b>part of</b> ${ancestors(r.id).map(esc).join(" ← ")}</span>`:''}<span><b>created</b> ${esc(r.created)}</span><span><b>status changed</b> ${esc(r.changed)}</span></div></div></td></tr>`:"";
+        return `<tr class="row ${open?'open':''}" data-id="${esc(r.id)}" tabindex="0" role="button" aria-expanded="${open}"><td class="c-id"><span class="idv"><span class="depth">${'· '.repeat(d)}</span>${esc(r.id)}</span></td><td class="c-st">${pill(r.status)}</td><td class="c-cr">${esc(r.created)}</td><td class="c-ch">${esc(r.changed)}</td><td><div class="name"><span class="exp ${hasDetail?'has-detail':''}">▶</span><span>${esc(r.name)}</span></div></td></tr>${det}`}).join("");
+      html+=`<section class="section ${collapsed?'collapsed':''}" data-cat="${cat.key}"><div class="sec-head" role="button" tabindex="0" aria-expanded="${!collapsed}"><span class="chev">▼</span><h2>${esc(cat.label)}</h2><span class="sec-idp">${esc(cat.idp)}</span><span class="sec-n">${rows.length}${rows.length!==all.length?` / ${all.length}`:''}</span></div><div class="sec-body">${flowFor(cat.key)}<table><thead><tr>${cols.map(th).join("")}</tr></thead><tbody>${body}</tbody></table></div></section>`;
+    }
+    root.innerHTML=html;document.getElementById("count").textContent=`${shown} of ${ROWS.length} shown`;
+    root.querySelectorAll(".sec-head").forEach(h=>{const cat=h.parentElement.dataset.cat;const t=()=>{state.collapsed.has(cat)?state.collapsed.delete(cat):state.collapsed.add(cat);render()};h.onclick=t;h.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();t()}}});
+    root.querySelectorAll("thead th").forEach(t=>t.onclick=()=>{const k=t.dataset.k;if(state.sortKey===k)state.dir*=-1;else{state.sortKey=k;state.dir=1}syncSort();render()});
+    root.querySelectorAll("tr.row").forEach(tr=>{const id=tr.dataset.id;const t=()=>{state.expanded.has(id)?state.expanded.delete(id):state.expanded.add(id);render()};tr.onclick=t;tr.onkeydown=e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();t()}}});
+    root.querySelectorAll(".fchip").forEach(c=>c.onclick=()=>{const ss=state.secStatuses[c.dataset.cat]||(state.secStatuses[c.dataset.cat]=new Set());const s=c.dataset.st;ss.has(s)?ss.delete(s):ss.add(s);renderSections()});
+    root.querySelectorAll(".fclear").forEach(b=>b.onclick=()=>{delete state.secStatuses[b.dataset.cat];renderSections()});
+  }
+  function syncSort(){document.getElementById("sortKey").value=state.sortKey;document.getElementById("dir").textContent=state.dir>0?"↑ asc":"↓ desc"}
+  function render(){renderChips();renderSections()}
+  document.getElementById("q").addEventListener("input",e=>{state.q=e.target.value;renderSections()});
+  document.getElementById("sortKey").addEventListener("change",e=>{state.sortKey=e.target.value;state.dir=1;syncSort();render()});
+  document.getElementById("dir").addEventListener("click",()=>{state.dir*=-1;syncSort();render()});
+  // Judge "all open?" against the VISIBLE rows only (B83): state.expanded keeps ids
+  // that later filters hid, and counting those made the button collapse (or no-op)
+  // when every visible row was actually closed.
+  document.getElementById("expandAll").addEventListener("click",()=>{const vis=ROWS.filter(match);const allOpen=vis.length>0&&vis.every(r=>state.expanded.has(r.id));if(allOpen){vis.forEach(r=>state.expanded.delete(r.id));document.getElementById("expandAll").textContent="Expand all"}else{vis.forEach(r=>state.expanded.add(r.id));document.getElementById("expandAll").textContent="Collapse all"}renderSections()});
+  document.getElementById("foot").innerHTML=`<strong>tracker.html</strong> — generated from <code>tracker.md</code> by <code>track render</code>. ${ROWS.length} items. Read-only; edit via <code>track add</code> / <code>track set-status</code>, then re-render.`;
+  syncSort();render();
+</script>
+</body>
+</html>

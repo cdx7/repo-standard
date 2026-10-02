@@ -1,0 +1,934 @@
+#!/usr/bin/env bash
+# verify — lint a repo against the standard (see ../standard/STANDARD.md).
+#   verify [target-dir] [--authored | --vendor-derived] [--strict]
+# Reports PASS/WARN/FAIL per check. Exit 1 if any FAIL (or any WARN under --strict).
+# Read-only: it inspects, it never edits.
+set -uo pipefail   # deliberately NOT -e: run every check, then aggregate.
+unset CDPATH       # an exported CDPATH would reroute the bare `cd` below (B71's class)
+
+# Resolve $0 through symlinks (B44): invoked via a symlink, dirname gives the LINK's
+# directory, TEMPLATE comes up empty, and a tracker FAIL silently degrades to a WARN
+# (exit 1 -> 0). readlink -f is GNU; where it's absent the plain path is what we had.
+SELF="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)"
+TEMPLATE="$SELF/../template"
+errx(){ printf 'verify: %s\n' "$*" >&2; exit 2; }
+
+TARGET="" ARCH="" STRICT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --authored)       ARCH=authored; shift ;;
+    --vendor-derived) ARCH=vendor-derived; shift ;;
+    --strict)         STRICT=1; shift ;;
+    -h|--help)        sed -n '2,5p' "$0"; exit 0 ;;
+    -*)               errx "unknown option '$1'" ;;
+    *)                if [ -z "$TARGET" ]; then TARGET="$1"; else errx "unexpected arg '$1'"; fi; shift ;;
+  esac
+done
+DEFAULTED=0; [ -n "$TARGET" ] || { TARGET="."; DEFAULTED=1; }
+cd -- "$TARGET" 2>/dev/null || errx "no such directory: $TARGET"
+ROOT="$(pwd)"
+
+if [ -t 1 ]; then R=$'\033[31m' Y=$'\033[33m' G=$'\033[32m' D=$'\033[2m' N=$'\033[0m'; else R= Y= G= D= N=; fi
+passes=0 warns=0 fails=0
+pass(){ printf '  %sPASS%s  %s\n' "$G" "$N" "$1"; passes=$((passes+1)); }
+warn(){ printf '  %sWARN%s  %s\n' "$Y" "$N" "$1"; warns=$((warns+1));  }
+fail(){ printf '  %sFAIL%s  %s\n' "$R" "$N" "$1"; fails=$((fails+1));  }
+skip(){ printf '  %s----  %s%s\n' "$D" "$1" "$N"; }
+sect(){ printf '\n%s%s%s\n' "$D" "$1" "$N"; }
+
+CM="$(date +%Y%m)"
+IS_GIT=0; git rev-parse --is-inside-work-tree >/dev/null 2>&1 && IS_GIT=1
+# Is this repo-standard's own source tree (holds the standard) rather than a stamped consumer?
+SOURCE=0; { [ -f standard/STANDARD.md ] && [ -d template/bin ]; } && SOURCE=1
+# A target-less run from the standard's own tree is almost always a slipped sign-off step
+# that would lint repo-standard and green-light a migration it never looked at (M07/B17).
+# `bin/verify .` — an EXPLICIT dot — still lints the standard itself.
+if [ "$SOURCE" = 1 ] && [ "$DEFAULTED" = 1 ]; then
+  errx "this is the standard's own source tree — pass a target (bin/verify ../<repo>), or 'bin/verify .' to lint the standard itself"
+fi
+# Infer archetype from the stamp if not given — remembering what the FLAG said, so a
+# flag that contradicts the stamp can be called out instead of silently winning (B76).
+ARCHFLAG="$ARCH"; STAMPARCH=""
+if [ -f .repo-standard-version ]; then
+  # Parse LINE 1 only, the same line the stamp verdict judges — reading the whole file
+  # let a stray marker on a later line (a merge-conflicted stamp, say) pick the
+  # archetype while the verdict blessed line 1, a self-contradictory green.
+  case "$(head -n 1 .repo-standard-version 2>/dev/null)" in
+    *"(vendor-derived)"*"(authored)"*|*"(authored)"*"(vendor-derived)"*) STAMPARCH="" ;;
+    *"(vendor-derived)"*) STAMPARCH=vendor-derived ;;
+    *"(authored)"*)       STAMPARCH=authored ;;
+  esac
+fi
+[ -n "$ARCH" ] || ARCH="$STAMPARCH"
+# Resolve a track tool: the repo's own copy first, else the standard's canonical one.
+# When the repo HAS a bin/track that isn't usable, say so (B78) — silently substituting
+# the template's renderer turns "chmod +x bin/track" into an unsolvable "stale tracker".
+# [ -x dir ] is TRUE for a searchable directory (B97), so require a regular file first.
+TRK="" TRKNOTE=""
+if [ -f bin/track ] && [ -x bin/track ]; then TRK="$ROOT/bin/track"
+else
+  if [ -d bin/track ]; then TRKNOTE="bin/track exists but is a DIRECTORY — clear it and run sync (checking with the template's copy meanwhile)"
+  elif [ -f bin/track ]; then TRKNOTE="bin/track present but not executable — fix with chmod +x (checking with the template's copy meanwhile)"
+  elif [ -e bin/track ] || [ -L bin/track ]; then TRKNOTE="bin/track exists but is not a usable executable file — clear it and run sync (checking with the template's copy meanwhile)"
+  elif [ -f .repo-standard-version ]; then TRKNOTE="bin/track missing — run sync to restore it (checking with the template's copy meanwhile)"
+  fi
+  [ -f "$TEMPLATE/bin/track" ] && [ -x "$TEMPLATE/bin/track" ] && TRK="$TEMPLATE/bin/track"
+fi
+
+printf '%sverify%s %s' "$D" "$N" "$ROOT"
+[ -n "$ARCH" ] && printf '  [%s]' "$ARCH"; [ "$SOURCE" = 1 ] && printf '  [standard source]'; printf '\n'
+
+# --- front door ---------------------------------------------------------------
+sect "front door"
+# Strip fenced code blocks before pattern checks (B96): a README that QUOTES a skeleton
+# placeholder in an example must not warn forever (and, under --strict, block sign-off).
+# Type-aware (CommonMark): a ~~~ block closes only on ~~~, so the inner ``` of a
+# wrapped example cannot flip the state and re-expose the rest of the file.
+# CommonMark-faithful (B140): a backtick fence OPENS only when its info string holds no
+# backtick (` ```make``` ` is an inline code span, not a fence — it used to hide the rest of
+# the file), and CLOSES only on a bare fence line; ~~~ fences may carry backticks. Stripped
+# lines print EMPTY rather than vanish, so NR stays the file's own line number for the
+# consumers that report one. A UTF-8 BOM on line 1 is shed first (a Windows-edited README
+# put \xEF\xBB\xBF in front of its first heading and the heading check never saw it).
+unfenced(){ LC_ALL=C awk '
+  NR==1 { sub(/^\357\273\277/, "") }
+  f=="" { if ($0 ~ /^ {0,3}```/) { m=$0; sub(/^ {0,3}`+/, "", m); if (m !~ /`/) { f="b"; print ""; next } }
+          else if ($0 ~ /^ {0,3}~~~/) { f="t"; print ""; next }
+          print; next }
+  f=="b" && $0 ~ /^ {0,3}```+[ \t]*$/ { f=""; print ""; next }
+  f=="t" && $0 ~ /^ {0,3}~~~+[ \t]*$/ { f=""; print ""; next }
+  { print "" }' "$1"; }
+# Other spellings of the front door (B138): init and verify read exactly README.md, so a
+# README / readme.md / README.txt was invisible to both — verify FAILed it "missing" with
+# no hint, and once init had put a skeleton beside it, blessed the skeleton and never
+# opened the real one. Same spelling rule as init's B137 refusal (lockstep): the basename
+# lowercases to `readme` or `readme.<one extension>`; README.md.bak and a readme/
+# directory do not count. Names are LISTED, not counted, so the remedy is concrete.
+readme_others=""
+for f in ./*; do
+  [ -f "$f" ] || [ -L "$f" ] || continue
+  n="${f#./}"; [ "$n" = README.md ] && continue
+  case "${n,,}" in
+    readme|readme.*) case "$n" in *.*.*) ;; *) readme_others="${readme_others:+$readme_others, }$n" ;; esac ;;
+  esac
+done
+if [ -f README.md ]; then
+  pass "README.md present"
+  # Two front doors is its own defect: the tools and every fresh session open README.md,
+  # so whatever the other spelling says is dark. WARN, not FAIL — it is a todo (fold, delete).
+  [ -z "$readme_others" ] || warn "README.md coexists with $readme_others — two front doors; fold the other into README.md and delete it (the tools read only the exact name)"
+  # Match the placeholders the skeleton actually ships (B61) — and NOT a bare `<repo>`,
+  # which is a common URL-template idiom in fully authored READMEs (B79).
+  # The consumer must READ ALL of its input (B114): under pipefail, grep -q's early
+  # exit SIGPIPEs unfenced() past the pipe buffer (rc 141) and this warn was silently
+  # SUPPRESSED on exactly the large READMEs; the heading check below inverted the same
+  # failure into a FABRICATED warn. So: awk sets a flag and keeps reading, both here
+  # and below — no consumer exits early.
+  # Names each placeholder and its line (B141): "still has skeleton placeholders" sent the
+  # maintainer hunting for one leftover `<the deliverable>` bullet under a finished README.
+  ph="$(unfenced README.md | LC_ALL=C awk '
+      /<repo name>/         && !a { a=NR }
+      /<the deliverable>/   && !b { b=NR }
+      /\(Replace this\.\)/  && !c { c=NR }
+      END { s=""; if (a) s=s "`<repo name>` (line " a ")"; if (b) s=s (s?", ":"") "`<the deliverable>` (line " b ")"; if (c) s=s (s?", ":"") "`(Replace this.)` (line " c ")"; printf "%s", s }')"
+  [ -z "$ph" ] || warn "README.md still has skeleton placeholders — $ph: fill what / state / map"
+  # Of the front door's three questions, "what state is it in / where do I resume" is the
+  # one that actually restores context — and the one a pre-existing README almost never
+  # has, since init never overwrites it. Checked as LABELLED STRUCTURE (does a section
+  # carry that heading), never as prose quality: judging whether the words are any good
+  # stays human. WARN, not FAIL — an unwritten front door is a todo, not a broken repo.
+  # Both heading styles count (B51): ATX (# Status) and setext (Status over === / ---).
+  # Runs over unfenced() output like the placeholder check — a code block quoting a
+  # heading is not a heading.
+  if ! unfenced README.md | LC_ALL=C awk '
+      { low=tolower($0) }
+      low ~ /^ {0,3}#+[[:space:]]/ && low ~ /(^|[^[:alnum:]_])(status|state|resume)([^[:alnum:]_]|$)/ { found=1 }
+      /^ {0,3}(=+|-+)[[:space:]]*$/ && plow ~ /(^|[^[:alnum:]_])(status|state|resume)([^[:alnum:]_]|$)/ { found=1 }
+      { plow=low }
+      END { exit found?0:1 }'; then
+    warn "README.md has no state / where-to-resume heading — the section that restores context"
+  fi
+elif [ -e README.md ] || [ -L README.md ]; then
+  # A directory or dangling symlink named README.md is not "missing" (B90) — the
+  # remedy differs: nothing can be written there until the obstruction is cleared.
+  fail "README.md exists but is not a regular file (the front door is unreadable)"
+elif [ -n "$readme_others" ]; then
+  # The front door IS there, under a spelling nothing reads: say which, and the fix.
+  fail "README.md missing (the front door) — found $readme_others instead; rename it to README.md (the tools read only that exact name)"
+else fail "README.md missing (the front door)"; fi
+
+# --- docs homes ---------------------------------------------------------------
+sect "docs homes"
+for d in docs/official docs/AI docs/dev-notes; do
+  if [ -d "$d" ]; then pass "$d/ present"; else fail "$d/ missing"; fi
+done
+if [ -d docs/AI/session-handoffs ]; then pass "docs/AI/session-handoffs/ present"; else warn "docs/AI/session-handoffs/ missing"; fi
+# docs/dev-notes/STATUS is the standard's lightest resume pointer — the file the Stop
+# hook exempts from its DUE signal so it can be updated freely. In a repo that adopted
+# the standard its absence is drift (D13), same shape (and same non-regular-file
+# diagnosis) as the tracker.md check below. Presence-only: judging the content stays
+# human, so a present STATUS earns no pass line.
+if [ -f docs/dev-notes/STATUS ]; then :
+elif [ -e docs/dev-notes/STATUS ] || [ -L docs/dev-notes/STATUS ]; then
+  warn "docs/dev-notes/STATUS exists but is not a regular file — clear it, then restore the file or re-run init (--allow-dirty if it refuses the now-dirty tree)"
+elif [ "$SOURCE" = 1 ] || [ -f .repo-standard-version ]; then
+  # The advice must survive F10 (convergence K11): a deleted TRACKED file is itself the
+  # dirty entry, so a bare "re-run init" always refuses — restore is the working remedy,
+  # init the fallback for a repo that never had the file.
+  warn "docs/dev-notes/STATUS missing — the state file is part of the standard this repo adopted (git restore it, or re-run init — --allow-dirty if it refuses the dirty tree)"
+fi
+
+# --- claude hooks -------------------------------------------------------------
+sect "claude hooks"
+# Presence first, UNCONDITIONALLY (B14): the old shape nested these under the
+# settings.json check, so a repo with no settings.json got no word about its hooks.
+for h in stop-handoff-check.sh session-start-rollover-check.sh; do
+  if [ -f ".claude/hooks/$h" ]; then
+    if [ -x ".claude/hooks/$h" ]; then pass "hook $h present + executable"; else warn "hook $h not executable (chmod +x)"; fi
+  else warn "hook $h missing"; fi
+done
+# A present hook script does nothing unless settings.json WIRES it — each script by
+# name under its event (B14). Segment-level, not a JSON parse (jq isn't assumed): the
+# script name must appear BETWEEN its own event key and the next occurrence of the
+# OTHER event key (or EOF), whatever the whitespace — a minified file passes, and a
+# file with the two hooks SWAPPED across events no longer does (B100). Accepted
+# residues, constructed cases both, failure direction non-destructive (a wrong verdict
+# here is a WARN, never a write): tokens stashed under a foreign parent key (e.g. a
+# "disabledHooks" block between the event keys) still pass, and invalid JSON is
+# judged as text.
+if [ -f .claude/settings.json ]; then
+  pass ".claude/settings.json present"
+  for trip in "Stop:SessionStart:stop-handoff-check.sh" "SessionStart:Stop:session-start-rollover-check.sh"; do
+    ev="${trip%%:*}"; rest="${trip#*:}"; oth="${rest%%:*}"; hs="${rest#*:}"
+    if LC_ALL=C awk -v ev="\"$ev\"" -v oth="\"$oth\"" -v hs="$hs" '
+        { buf = buf $0 "\n" }
+        END { i = index(buf, ev); if (!i) exit 1
+              seg = substr(buf, i + length(ev))
+              j = index(seg, oth); if (j) seg = substr(seg, 1, j - 1)
+              exit index(seg, hs) ? 0 : 1 }' .claude/settings.json; then
+      pass "settings.json wires $hs ($ev, segment-level)"
+    else
+      warn "settings.json does not wire $hs under \"$ev\" — the hook will never run"
+    fi
+  done
+else warn ".claude/settings.json missing (hooks not wired)"; fi
+# A root CLAUDE.md in every adopted repo (D34, decided 2026-09-14): the file Claude Code loads
+# in full at the start of every session holds the repo's standing instructions — even when all
+# it says is that they live in the personal CLAUDE.local.md. A WARN, like the front door's
+# state section: an unwritten one is a todo that blocks the --strict sign-off, not a broken
+# repo. Presence only — what it says stays human. Same adopted-or-source gate and non-regular-
+# file diagnosis as STATUS above (D13, B90).
+if [ -f CLAUDE.md ]; then pass "CLAUDE.md present"
+elif [ -e CLAUDE.md ] || [ -L CLAUDE.md ]; then
+  warn "CLAUDE.md exists but is not a regular file — Claude Code cannot read it; replace it with the file"
+elif [ "$SOURCE" = 1 ] || [ -f .repo-standard-version ]; then
+  warn "CLAUDE.md missing at the repo root — every adopted repo has one, even if it only says the directives live in CLAUDE.local.md (re-run init to stamp it — --allow-dirty if it refuses the dirty tree — or write it)"
+fi
+# Does the INDEX blob of $2 (source path relative to toplevel $1) carry the exact rule
+# line $3? Shared by the settings.local.json arm here and the secret-hygiene safe-arm
+# below — the two must judge "committed rule" identically. Three hard-won shapes live
+# in this awk: the consumer READS ALL of its input, END-flag (B108/B114's rule — a
+# bare `| grep -qx` SIGPIPEs git-show past the pipe buffer under pipefail, and the
+# verdict goes size-driven random); each blob line is NORMALIZED the way git's ignore
+# parser reads it (trailing CR stripped, then unescaped trailing blanks — convergence
+# K3), because check-ignore echoes the PARSED pattern, which never matches the raw
+# bytes of a CRLF-committed .gitignore or a rule with a stray trailing space; and the
+# pattern arrives via ENVIRON, never `awk -v` (convergence L2) — -v values get awk
+# string-escape processing, so every backslash legal in gitignore syntax (`\.`,
+# `secret\.pem`) was rewritten on the pattern side and a committed rule false-WARNed
+# as worktree-only, with a gawk warning leaking to stderr.
+blob_has_rule(){  # toplevel, source-path, pattern -> 0 iff the committed blob has it
+  # git's ignore parser also skips a leading UTF-8 BOM (convergence M3): a .gitignore
+  # saved "UTF-8 with BOM" echoes its line-1 pattern bare, while the raw blob line
+  # keeps the three BOM bytes — strip them on NR==1 or a committed first-line rule
+  # false-WARNs as worktree-only. sprintf keeps the bytes out of regex-escape land.
+  git -C "$1" show ":./$2" 2>/dev/null \
+    | BHR_PAT="$3" LC_ALL=C awk 'BEGIN{p=ENVIRON["BHR_PAT"]; bom=sprintf("%c%c%c",239,187,191)}
+          { if (NR==1 && index($0,bom)==1) $0=substr($0,4)
+            sub(/\r$/,"")
+            while ($0 ~ / $/ && $0 !~ /\\ $/) sub(/ $/,"")
+            if ($0==p) f=1 } END{exit f?0:1}'
+}
+# Which rule ignores $1? Sets ignsrc (source file) + ignpat (pattern); rc 1 when
+# nothing ignores it. Parsed from `check-ignore -v -z`, NOT the colon format
+# (convergence L3+L4): the plain format C-quotes any source path core.quotePath finds
+# unprintable — a committed rule under a non-ASCII dirname echoed as
+# `"s\303\274b/.gitignore"` failed the basename allowlist and every downstream index
+# read — and an unescaped colon IN the source desyncs the `source:linenum:pattern`
+# split. The -z form is unquoted and NUL-delimited: source, linenum, pattern, path.
+ign_resolve(){  # path [noexcl] -> 0 with ignsrc/ignpat set; 1 if not ignored
+  local lineno rest
+  ignsrc="" ignpat=""
+  # -z is only valid with --stdin, so the path goes in NUL-terminated on stdin.
+  # A second arg re-asks with core.excludesFile neutralized (B135): in-tree .gitignore
+  # rules OUTRANK the excludes file (gitignore(5) precedence), so a deciding source
+  # that changes under the override was never a real in-tree rule — it was the config
+  # pointer, echoed relative and possibly NAMED .gitignore. The expansion is unquoted
+  # on purpose: it must split into the two words `-c core.excludesFile=/dev/null`.
+  { IFS= read -r -d '' ignsrc && IFS= read -r -d '' lineno \
+      && IFS= read -r -d '' ignpat && IFS= read -r -d '' rest || true; } \
+    < <(printf '%s\0' "$1" | git ${2:+-c core.excludesFile=/dev/null} check-ignore -v -z --stdin 2>/dev/null)
+  # A NEGATION match means NOT ignored (convergence M1): -v echoes the deciding
+  # `!pattern` record at rc 0 exactly where plain -q exits 1, so judging bare
+  # [ -n "$ignsrc" ] false-PASSed a settings.local.json whose committed .gitignore
+  # ends `!.claude/settings.local.json` — while the next `git add -A` stages it.
+  # A literal-! pattern echoes backslash-escaped (`\!…`), so the prefix test is safe.
+  case "$ignpat" in '!'*) ignsrc="" ignpat=""; return 1 ;; esac
+  [ -n "$ignsrc" ]
+}
+# The local-settings ignore must be REPO-LOCAL. Asking `git check-ignore` whether the file
+# is ignored isn't enough: it answers yes on a machine whose *global* ignore covers it,
+# while the repo stays unprotected for every other clone. So resolve which file supplies
+# the rule and require it to be a .gitignore inside the working tree.
+# One probe of the slot: is $1 ignored by a rule that lives in a COMMITTED, in-repo
+# .gitignore? $2 names it in the verdict, $3 is the remedy for the not-ignored case.
+# Run for the exact file AND for a representative harness temp sibling (B128): Claude
+# Code rewrites settings.local.json atomically through settings.local.json.tmp.<pid>.<hex>
+# siblings, which the exact-name rule never covered — untracked noise that can race
+# `git add -A` into an exit-128 abort. check-ignore judges paths that do not exist, so
+# the sibling probe needs no file on disk.
+slot_probe(){
+  local what="$2" remedy="$3" gtop osrc opat
+  ign_resolve "$1" || true
+  case "$ignsrc" in
+    ""|/*|.git/*) warn "$what not ignored by a rule in this repo (a global ignore doesn't travel with a clone)$remedy" ;;
+    *)
+      # Allowlist by basename (B24): a RELATIVE source that is not a .gitignore —
+      # e.g. a relative core.excludesFile in .git/config, echoed relative by
+      # check-ignore — does not travel with a clone either; blessing every
+      # relative source called it repo-local. Same class as the secret-hygiene
+      # safe-arm below — and the same COMMITTED requirement (convergence K6): init
+      # and sync both WRITE .gitignore and neither commits it, so an untracked
+      # in-tree copy, or a rule only in the worktree copy of a tracked one, is
+      # present on this machine and absent from every clone — where the next
+      # `git add -A` commits the developer's personal settings.local.json. In-tree
+      # sources echo relative to the REPO ROOT, so the index reads anchor there.
+      case "${ignsrc##*/}" in
+        .gitignore)
+          # A RELATIVE in-repo core.excludesFile can be NAMED .gitignore (B135):
+          # check-ignore echoes it relative, the basename allowlist read it as
+          # in-tree, and blob_has_rule found the committed rule — PASS — while a
+          # clone lacks the .git/config pointer, so nothing is protected there.
+          # Re-ask with the excludes file neutralized (see ign_resolve): a real
+          # in-tree rule outranks it and resolves identically; a changed answer
+          # convicts the config. Keep this screen in lockstep with the secret-
+          # hygiene arm below.
+          osrc="$ignsrc"; opat="$ignpat"
+          ign_resolve "$1" noexcl || true
+          if [ "$ignsrc" != "$osrc" ] || [ "$ignpat" != "$opat" ]; then
+            warn "$what ignored only via core.excludesFile ($osrc) — the .git/config pointer does not travel with a clone; put the rule in the repo's committed .gitignore"
+          else
+          gtop="$(git rev-parse --show-toplevel 2>/dev/null)"
+          if ! git -C "$gtop" ls-files --error-unmatch -- "$ignsrc" >/dev/null 2>&1; then
+            warn "$what ignored by UNTRACKED $ignsrc — commit the rule or it does not travel with a clone"
+          elif blob_has_rule "$gtop" "$ignsrc" "$ignpat"; then
+            pass "$what ignored by committed $ignsrc rule"
+          else
+            warn "$what ignored by a rule present only in the WORKTREE copy of $ignsrc — commit the rule"
+          fi
+          fi ;;
+        *)          warn "$what ignored by $ignsrc — not a .gitignore in this repo, so the rule does not travel with a clone" ;;
+      esac ;;
+  esac
+}
+if [ "$IS_GIT" = 1 ]; then
+  # A symlinked .gitignore gets the REAL diagnosis up front (B134): git >= 2.32 opens
+  # it O_NOFOLLOW and reads nothing, so every rule behind the link is inert. Without
+  # this the probes below still WARN, but with the global-ignore phrasing — a cause
+  # that sends the operator to the wrong fix. The probes still run: their per-path
+  # verdicts stay truthful (rules could still come from elsewhere, and warn there too).
+  if [ -L .gitignore ]; then
+    warn ".gitignore is a SYMLINK — git 2.32+ refuses to read it, so none of its rules apply; replace the link with a regular file carrying its rules"
+  fi
+  if git ls-files --error-unmatch .claude/settings.local.json >/dev/null 2>&1; then
+    warn "personal .claude/settings.local.json is COMMITTED — untrack it, then add the ignore rule"
+  else
+    slot_probe .claude/settings.local.json ".claude/settings.local.json" ""
+  fi
+  # A tracked .tmp sibling is a stale temp copy of the personal settings that a
+  # `git add -A` swept into history — the race's NON-aborting outcome (convergence N3).
+  # Scoped to the harness's .tmp.* shape so a deliberately tracked sibling like
+  # settings.local.json.example is not miscalled a temp copy; newlines in adversarial
+  # names fold to '?' so the WARN stays one line (convergence N5).
+  sibs="$(git ls-files -z -- '.claude/settings.local.json.tmp.*' 2>/dev/null | tr '\n\0' '? ')"
+  sibs="${sibs% }"
+  if [ -n "$sibs" ]; then
+    warn "harness temp sibling(s) of settings.local.json are COMMITTED: $sibs — stale copies of the personal settings; untrack them (git rm --cached)"
+  else
+    slot_probe .claude/settings.local.json.tmp.0.0 "settings.local.json temp siblings (.claude/settings.local.json.tmp.*)" \
+      " — widen the slot to .claude/settings.local.json*"
+  fi
+  # CLAUDE.local.md (D34, v0.3.22): personal Claude directives, loaded after CLAUDE.md in every
+  # session; the Claude Code docs say to gitignore it and nothing does so on its own. Probed at
+  # the root AND in a subdirectory — Claude Code reads both — so a root-anchored
+  # /CLAUDE.local.md, which leaves subdirectory copies exposed, WARNs with the fix. A tracked
+  # one at any depth is already in history: say so instead of probing. Newlines in names fold
+  # to '?' so the WARN stays one line (convergence N5's rule).
+  locs="$(git ls-files -z -- 'CLAUDE.local.md' ':(glob)**/CLAUDE.local.md' 2>/dev/null | tr '\n\0' '? ')"
+  locs="${locs% }"
+  if [ -n "$locs" ]; then
+    warn "personal CLAUDE.local.md is COMMITTED: $locs — untrack it (git rm --cached), then add the ignore rule"
+  else
+    slot_probe CLAUDE.local.md "CLAUDE.local.md" " — add the line CLAUDE.local.md to .gitignore"
+    slot_probe subdir/CLAUDE.local.md "CLAUDE.local.md in subdirectories" \
+      " — use the unanchored rule CLAUDE.local.md, not /CLAUDE.local.md"
+  fi
+else
+  # Say which checks a non-git tree loses (B39) — silently omitting them scored the
+  # same tree BETTER without a .git than with one.
+  skip "not a git repo — cannot check where the settings.local.json and CLAUDE.local.md ignore rules live"
+fi
+
+# --- handoff bucketing --------------------------------------------------------
+sect "handoff bucketing"
+# When the canonical dir is ABSENT, look for a SHADOW dir before judging anything
+# (B15): the glob below sees only docs/AI/session-handoffs, so a repo whose handoffs
+# live elsewhere (a START_UP/ folder, in one migration) got a vacuous green while the hooks
+# judged the wrong dir. The TRIGGER is absence, not emptiness (convergence K5): the
+# Stop hook binds canonical outright whenever it EXISTS — and a freshly-init'd repo is
+# exactly a present-but-empty canonical dir — so the old emptiness trigger made the
+# first verify after adoption call a monorepo sibling's (or a worktree's) handoffs a
+# "shadow" of a dir the hook was correctly bound to, with a destructive git mv remedy.
+# The discovery find is a copy of the Stop hook's fallback
+# (.claude/hooks/stop-handoff-check.sh) with paths relative to the target root —
+# trigger, prune list, example-handoffs/template exclusions, AND the
+# shallowest-candidate-outright pick (the hook does not require the candidate to be
+# populated; init's B15 pre-flight picks the same way) must stay in lockstep with the
+# hook, or verify and the hook disagree about which dir is real.
+# Accepted residue: the pipeline is line-based, so a newline in a stray parent's
+# dirname splits the path and the shadow goes unseen — pathological, and lockstep-
+# shaped (init and both hooks miss it the same way). -mindepth 1 is a semantic no-op
+# HERE (the start point "." never matches the prune names) but stays for verbatim
+# lockstep with the hook/init copies, where it is B131's fix.
+shadow=""
+if [ ! -d docs/AI/session-handoffs ]; then
+  cand="$(find . -mindepth 1 \( -name .git -o -name node_modules -o -name .venv -o -name vendor \) -prune \
+            -o -type d -name session-handoffs -not -path '*/example-handoffs/*' -not -path './template/*' -print 2>/dev/null \
+          | awk '{ n=gsub(/\//,"/"); print n, $0 }' | sort -k1,1n -k2,2 | head -n1 | cut -d' ' -f2-)"
+  cand="${cand#./}"
+  # Only a POPULATED pick warns (top level or a YYYYMM archive bucket — the hook reads
+  # both): an empty stray dir shadows nothing worth keeping, and the missing canonical
+  # scaffold is the structure section's finding, not this one's. Symlinks COUNT
+  # (convergence L5): init's ls-based B15 test and the hook's newest-pick both lstat,
+  # so a dangling-symlink handoff (a clone whose link targets lived outside the tree)
+  # is "populated" to them — [ -e ] alone followed the link and verify stayed silent
+  # exactly where init refuses and the hook binds.
+  if [ -n "$cand" ]; then
+    for f in "$cand"/session-handoff-*.md "$cand"/[0-9][0-9][0-9][0-9][0-9][0-9]/session-handoff-*.md; do
+      { [ -e "$f" ] || [ -L "$f" ]; } && { shadow="$cand"; break; }
+    done
+  fi
+fi
+if [ -n "$shadow" ]; then
+  # No bucketing pass line in this state: it would be a green claim about the wrong
+  # (or empty) directory.
+  # Name a relocate command that can RUN here (convergence L6, K2's class): verify
+  # supports non-git targets, where `git mv` is a fatal, not a remedy. And `git mv`
+  # needs a TRACKED source (convergence M8): on an untracked shadow — the normal
+  # state while a commit is gated — it dies `fatal: source directory is empty`, so
+  # branch on trackedness exactly like init's B15 pre-flight, or verify and init
+  # give contradictory advice for the same tree. The ./ anchor keeps a leading-':'
+  # name out of pathspec-magic land, as in init.
+  if [ "$IS_GIT" = 1 ] && git ls-files --error-unmatch -- "./$shadow" >/dev/null 2>&1; then
+    mvcmd="git mv"
+  elif [ "$IS_GIT" = 1 ]; then
+    mvcmd="mv, then git add docs/AI/session-handoffs (the handoffs are untracked, so git mv cannot move them)"
+  else
+    mvcmd="mv"
+  fi
+  warn "handoffs live at $shadow, not docs/AI/session-handoffs — relocate with $mvcmd; the hooks only find them by fallback search, and creating the canonical dir without moving them would take them dark"
+elif [ -d docs/AI/session-handoffs ]; then
+  stray=0
+  for f in docs/AI/session-handoffs/session-handoff-*.md; do
+    [ -e "$f" ] || continue
+    ym=$(basename "$f" | sed -n 's/^session-handoff-\([0-9]\{4\}\)-\([0-9]\{2\}\)-.*/\1\2/p')
+    [ -n "$ym" ] || continue
+    if [ "$ym" != "$CM" ]; then warn "not archived: $(basename "$f") (belongs in $ym/)"; stray=$((stray+1)); fi
+  done
+  [ "$stray" -eq 0 ] && pass "top-level handoffs are all current-month"
+else skip "no session-handoffs/ to check"; fi
+
+# --- tracker in sync ----------------------------------------------------------
+sect "tracker"
+if [ -f docs/dev-notes/tracker.md ]; then
+  [ -n "$TRKNOTE" ] && warn "$TRKNOTE"
+  # The skeleton H1 placeholder can only live here, and this is the file that carries it (B61).
+  if head -n 1 docs/dev-notes/tracker.md 2>/dev/null | grep -qF '<repo>'; then
+    warn "tracker.md H1 still has the skeleton placeholder '<repo>'"
+  fi
+  if [ ! -f docs/dev-notes/tracker.html ]; then
+    if [ -e docs/dev-notes/tracker.html ] || [ -L docs/dev-notes/tracker.html ]; then
+      warn "tracker.html exists but is not a regular file — clear it, then run 'track render'"
+    else
+      warn "tracker.html not generated — run 'track render'"
+    fi
+  elif [ -n "$TRK" ]; then
+    # Read-only means read-only (B27): render --check writes its temp files NEXT TO the
+    # tracker, so run it on a COPY in a temp dir outside the audited tree. track derives
+    # the page title from the file's CONTENT, so the copy renders byte-identical.
+    # And judge the tool by its own verdict line, not its bare exit status (B27+B33):
+    # exit 1 is both "stale" and every track error, and a broken/stub track exiting 0
+    # used to pass as "in sync" — a claim nothing had actually checked.
+    tchk="$(mktemp -d)"; trc=0
+    if ! cp docs/dev-notes/tracker.md docs/dev-notes/tracker.html "$tchk/" 2>/dev/null; then
+      rm -rf "$tchk"
+      warn "tracker.md/tracker.html could not be read — fix permissions; sync cannot be judged"
+    else
+    tmsg="$(TRACKER_FILE="$tchk/tracker.md" "$TRK" render --check 2>&1)" || trc=$?
+    if [ "$trc" -eq 0 ] && printf '%s' "$tmsg" | grep -q 'up to date'; then
+      pass "tracker.html in sync with tracker.md"
+    elif [ "$trc" -ne 0 ] && printf '%s' "$tmsg" | grep -q 'STALE'; then
+      # A pre-0.3.9 consumer track titles the page from the file's PATH when the H1
+      # isn't canonical — the temp copy then renders a different <title> than the
+      # in-place one did, and --check cries STALE on a genuinely in-sync pair, forever
+      # (B110): the fleet's normal pre-sync state. Discriminate before failing: render
+      # the same tracker.md at two DIFFERENTLY-NAMED temp paths. A content-derived
+      # title renders identically at both — a title difference is then REAL staleness
+      # and fails; a path-derived title differs between them, and only then is the
+      # title-insensitive comparison (everything but the two title-bearing lines)
+      # allowed to bless the pair.
+      # The two copies sit at the CANONICAL docs/dev-notes depth under differently-
+      # named roots: a path-deriving track walks two directories up from tracker.md,
+      # and the difference must live above that walk to show in the title.
+      ta="$tchk/pa/docs/dev-notes" tb="$tchk/pb/docs/dev-notes"
+      if mkdir -p "$ta" "$tb" 2>/dev/null \
+         && cp docs/dev-notes/tracker.md "$ta/tracker.md" 2>/dev/null \
+         && cp docs/dev-notes/tracker.md "$tb/tracker.md" 2>/dev/null \
+         && TRACKER_FILE="$ta/tracker.md" "$TRK" render >/dev/null 2>&1 && [ -f "$ta/tracker.html" ] \
+         && TRACKER_FILE="$tb/tracker.md" "$TRK" render >/dev/null 2>&1 && [ -f "$tb/tracker.html" ] \
+         && ! cmp -s "$ta/tracker.html" "$tb/tracker.html" \
+         && cmp -s <(awk 'index($0,"<title>")==0 && index($0,"<h1")==0' "$ta/tracker.html") \
+                   <(awk 'index($0,"<title>")==0 && index($0,"<h1")==0' docs/dev-notes/tracker.html); then
+        pass "tracker.html in sync with tracker.md (only the page title differs — this repo's bin/track titles by path; run sync to update it)"
+      else
+        fail "tracker.html is stale — run 'track render'"
+      fi
+    elif [ "$trc" -eq 0 ]; then
+      warn "track render --check exited 0 without a verdict — bin/track looks broken; cannot judge tracker sync"
+    else
+      # Surface track's own first line, with the temp-copy path rewritten to the real
+      # tracker's home: the B85 0x1f guard routes corrupt-FILE refusals here, and a
+      # bare "fix track" misdirected at a healthy tool while the file/line/remedy in
+      # $tmsg (a path under $tchk, deleted two lines down) never reached the operator.
+      tline="${tmsg%%$'\n'*}"; tline="${tline//"$tchk"/docs/dev-notes}"
+      warn "track render --check failed (exit $trc)${tline:+: $tline} — a tool or tracker-file problem, not proven staleness"
+    fi
+    rm -rf "$tchk"
+    fi
+  else warn "tracker.md present but no track tool found to verify it"; fi
+elif [ -e docs/dev-notes/tracker.md ] || [ -L docs/dev-notes/tracker.md ]; then
+  # Same non-file diagnosis as README.md/bin/track get (B90/B97's class): "missing"
+  # plus a re-run-init remedy would be a dead end — init skips existing paths.
+  warn "docs/dev-notes/tracker.md exists but is not a regular file — clear it, then restore the file or re-run init (--allow-dirty if it refuses the now-dirty tree)"
+elif [ "$SOURCE" = 1 ] || [ -f .repo-standard-version ]; then
+  # This repo adopted the standard: an absent tracker is DRIFT, not "not applicable"
+  # (B32, B04's class) — the old '----' line appeared in no tally at all.
+  warn "docs/dev-notes/tracker.md missing — the tracker is part of the standard this repo adopted (git restore it, or re-run init — --allow-dirty if it refuses the dirty tree)"
+else skip "no tracker.md to check"; fi
+
+# --- commit guard -------------------------------------------------------------
+sect "commit guard"
+if [ -f .githooks/pre-commit ]; then
+  if [ -x .githooks/pre-commit ]; then pass ".githooks/pre-commit present + executable"; else warn ".githooks/pre-commit not executable — git silently ignores it (chmod +x)"; fi
+  if [ "$IS_GIT" = 1 ]; then
+    # RESOLVE the configured hooksPath and compare paths, not strings (B105): an
+    # absolute path to this repo's .githooks — required for git-worktree setups — is
+    # the same guard, and the old literal '.githooks' match false-WARNed on it.
+    # Ask GIT how it resolves the setting (`rev-parse --git-path hooks`): a relative
+    # value resolves against the repo TOPLEVEL, not our target dir (they differ for a
+    # monorepo-subdir target), and a `~/…` value is a git path-type it expands — both
+    # were misjudged by hand-prefixing $ROOT.
+    hp="$(git config --get core.hooksPath 2>/dev/null)"
+    want="$(readlink -f "$ROOT/.githooks" 2>/dev/null || printf '%s' "$ROOT/.githooks")"
+    got=""
+    if [ -n "$hp" ]; then
+      hpdir="$(git rev-parse --git-path hooks 2>/dev/null)"
+      [ -n "$hpdir" ] && got="$(readlink -f "$hpdir" 2>/dev/null || printf '%s' "$hpdir")"
+    fi
+    if [ -n "$hp" ] && [ "$got" = "$want" ]; then
+      pass "core.hooksPath -> $hp (guard active)"
+    elif [ -n "$hp" ] && [ -x "$got/pre-commit" ] && grep -qsE '^[^#]*track render --check' "$got/pre-commit"; then
+      # A foreign hooks dir whose pre-commit is recognizably THIS standard's guard (it
+      # runs `track render --check` — on a NON-comment line, so a migration note that
+      # merely mentions the guard cannot bless a hook that no longer runs it). E.g. a
+      # worktree pointing at the main checkout's .githooks. Blessing ANY executable
+      # pre-commit here (B118) green-lit husky and friends while the tracker guard
+      # specifically was gone; 0.3.8 warned on that.
+      pass "core.hooksPath -> $hp (the tracker guard runs there; not this tree's .githooks)"
+    elif [ -n "$hp" ] && [ -x "$got/pre-commit" ]; then
+      warn "core.hooksPath -> $hp — a pre-commit runs there, but it is NOT the tracker staleness guard (this tree's .githooks is bypassed): repoint it, or chain .githooks/pre-commit from that hook"
+    else
+      warn "core.hooksPath not set to .githooks (guard inactive): run 'git -C \"$ROOT\" config core.hooksPath .githooks'"
+    fi
+  else
+    skip "not a git repo — core.hooksPath cannot be checked"
+  fi
+elif [ "$SOURCE" = 1 ] || [ -f .repo-standard-version ]; then
+  # This repo adopted the standard, so an absent guard is drift, not "not applicable".
+  if [ "$IS_GIT" = 1 ] && [ "$(git config --get core.sparseCheckout 2>/dev/null)" = "true" ]; then
+    # In a cone-mode sparse checkout git finds NO hook at core.hooksPath and runs
+    # nothing, silently — worse than the designed fail-open, which at least prints (B70).
+    warn ".githooks/pre-commit missing — this is a SPARSE checkout: if .githooks is excluded, git runs no hook at all (add .githooks to the sparse set: git sparse-checkout add .githooks)"
+  else
+    warn ".githooks/pre-commit missing — the tracker staleness guard is gone (run sync)"
+  fi
+else skip "no .githooks/pre-commit (repo has not adopted the standard)"; fi
+# The exec bit that TRAVELS is the index's (B23): a machinery file committed 100644
+# ships disarmed to every clone even while the local copy is +x — and the worktree
+# checks above cannot see that. bin/track is judged here too, a file verify otherwise
+# never examines directly (a symlink mode of 120000 is fine and skipped).
+if [ "$IS_GIT" = 1 ]; then
+  for xf in .githooks/pre-commit bin/track bin/register .claude/hooks/stop-handoff-check.sh .claude/hooks/session-start-rollover-check.sh; do
+    mode="$(git ls-files -s -- "$xf" 2>/dev/null | awk '{print $1; exit}')"
+    [ -n "$mode" ] || continue   # untracked/absent — presence is judged elsewhere
+    if [ "$mode" = "100644" ]; then
+      warn "$xf is committed WITHOUT the exec bit — every clone gets it disarmed (run sync, or: git update-index --chmod=+x $xf)"
+    fi
+  done
+else
+  skip "not a git repo — committed exec modes cannot be checked"
+fi
+
+# --- managed files --------------------------------------------------------------
+# The files sync owns (decided 2026-10-02, REPO-STANDARD.md Q3): a repo must run the
+# standard's code, and its notice must say what the standard says. Two questions, kept apart:
+# (1) VERSION — is a newer standard available? The stamp against this checkout's VERSION,
+#     by version order (sort -V, as sync's downgrade guard). Older warns "run sync"; newer
+#     warns that this checkout is behind (sync refuses that direction outright).
+# (2) CONTENT — does each managed file match its release? Each is compared with its copy AT THE
+#     STAMPED VERSION, read from that version's tag in this checkout (git show, read-only),
+#     not with the current template: between releases main carries unreleased changes under
+#     the same VERSION, and comparing against it called every untouched repo "edited".
+#     settings.json is left out (a repo may extend it; its hooks wiring is checked above),
+#     a file the stamped version did not have is skipped, and a missing file is reported by
+#     its own section — except the notice, which no other section checks. No tag here
+#     (a clone without tags, a version this checkout never had) means no content verdict:
+#     it says so instead of guessing. A difference means an edit here, or an install from an
+#     unreleased checkout (its stamp names the last release, its files are newer): the
+#     warning names both.
+sect "managed files"
+if [ "$SOURCE" = 1 ]; then
+  skip "standard source repo — its managed files are the template itself"
+elif [ ! -f .repo-standard-version ]; then
+  skip "no .repo-standard-version — managed files not checked"
+else
+  mver="$(awk 'NR==1{print $2}' .repo-standard-version 2>/dev/null)"
+  sver="$(head -n 1 "$SELF/../VERSION" 2>/dev/null | tr -d '[:space:]')"
+  case "$mver" in
+    [0-9]*.[0-9]*)
+      if [ -n "$sver" ] && [ "$mver" != "$sver" ]; then
+        if [ "$(printf '%s\n%s\n' "$mver" "$sver" | sort -V | tail -n 1)" = "$sver" ]; then
+          warn "this repo is on repo-standard $mver; $sver is available — run sync to update it"
+        else
+          warn "this repo is on repo-standard $mver, newer than the standard checkout running verify ($sver) — update that checkout (git pull), then re-run verify"
+        fi
+      fi
+      mtag="v$mver"
+      if ! git -C "$SELF/.." rev-parse -q --verify "refs/tags/$mtag^{commit}" >/dev/null 2>&1; then
+        skip "managed-file content not checked: the standard checkout running verify has no tag $mtag (not tagged yet, cloned without tags, or a version it never had)"
+      else
+        mlist=".claude/hooks/stop-handoff-check.sh .claude/hooks/session-start-rollover-check.sh .githooks/pre-commit bin/track REPO-STANDARD.md"
+        [ "$ARCH" = vendor-derived ] && mlist="$mlist bin/register"
+        medited="" mn=0
+        for mf in $mlist; do
+          git -C "$SELF/.." cat-file -e "$mtag:template/$mf" 2>/dev/null || continue   # not part of that version
+          if [ ! -e "$mf" ] && [ ! -L "$mf" ]; then
+            [ "$mf" = REPO-STANDARD.md ] && warn "REPO-STANDARD.md missing — the notice saying what the standard placed here and what not to break; run sync to restore it"
+            continue
+          fi
+          [ -f "$mf" ] && [ ! -L "$mf" ] || continue   # not a regular file: its own section, or sync's BLCK, says so
+          mn=$((mn+1))
+          git -C "$SELF/.." show "$mtag:template/$mf" 2>/dev/null | cmp -s - "$mf" || medited="${medited:+$medited, }$mf"
+        done
+        if [ -n "$medited" ]; then
+          warn "differ from repo-standard $mver as released: $medited — edited here, or installed from an unreleased checkout of the standard; run sync from a released standard to restore them (sync --check shows each diff), or carry a deliberate edit into the standard"
+        elif [ "$mn" -gt 0 ]; then
+          pass "managed files match repo-standard $mver ($mn checked)"
+        fi
+      fi ;;
+    *) skip "the stamp records no readable version — managed files not checked (the stamp section says why)" ;;
+  esac
+fi
+
+# --- version control -----------------------------------------------------------
+# Spine rule 8's mechanical half (F12): tags must sort as versions per clone. Plain git
+# sorts tag names as strings, so v0.3.10 files between v0.3.1 and v0.3.2. Per-clone config
+# never travels with the repo — hence a check with the exact remedy, like core.hooksPath.
+# git's short alias v:refname and the descending forms are the same sort. The commit gate
+# itself (consent before commit/push) is judgment and stays unchecked.
+sect "version control"
+if [ "$IS_GIT" = 1 ]; then
+  ts="$(git config --get tag.sort 2>/dev/null)"
+  case "$ts" in
+    version:refname|v:refname|-version:refname|-v:refname)
+      pass "tag.sort -> $ts (tags list as versions)" ;;
+    '')
+      warn "tag.sort not set — tags sort as strings (v0.3.10 files between v0.3.1 and v0.3.2): run 'git -C \"$ROOT\" config tag.sort version:refname'" ;;
+    *)
+      warn "tag.sort -> $ts, not a version sort (v0.3.10 files between v0.3.1 and v0.3.2): run 'git -C \"$ROOT\" config tag.sort version:refname'" ;;
+  esac
+else
+  skip "not a git repo — tag.sort cannot be checked"
+fi
+
+# --- secret hygiene -----------------------------------------------------------
+# The match is on filename/path, never on content, so it cannot tell a real leak from a
+# file that is committed ON PURPOSE (e.g. a config profile whose secret field is a
+# placeholder). Such a file declares itself with an in-file marker on one of its first
+# lines — the exception then lives next to the thing it excepts and shows up in every
+# diff of that file. A file that CANNOT carry a text line (a .p12/DER keystore) declares
+# itself through a committed sidecar `<file>.allow-committed` holding the marker (B75).
+# Record the *why* in DEVIATIONS.md; this is only the mechanism.
+#
+# Every judgment about COMMITTED state reads the INDEX BLOB, never the worktree (B60):
+# a marker only present in the worktree is exactly the mid-remediation state (add
+# marker, see green, forget to commit) the old check blessed.
+# Dependency trees are pruned (same list as the Stop hook — the two must agree on what
+# counts as "this repo"): a .pem in node_modules is a dependency's test fixture, not a
+# secret you committed, and walking it is thousands of files of pure noise.
+sect "secret hygiene"
+ALLOW_MARKER='repo-standard: allow-committed'
+# Is the exception declared IN THE INDEX — marker in the staged blob's first 40 lines
+# (-a: read it even if the blob looks binary), or in a committed sidecar?
+# ":./path" (not ":path"): the bare form resolves from the repo ROOT, which silently
+# breaks every declared exception when the verify target is a subdirectory of a larger
+# git repo (monorepo package) — the ./ makes git resolve relative to the cwd.
+allowed_committed(){  # path relative to the target root (no leading ./)
+  # The marker scans CONSUME their whole input (B108): under pipefail, grep -q's early
+  # exit SIGPIPEd git-show/head on any blob past the pipe buffer (rc 141), and a
+  # validly declared exception in a LARGE file then reported as an undeclared tracked
+  # secret. awk flags a hit and keeps reading; only the first 40 lines may declare.
+  git show ":./$1" 2>/dev/null \
+    | LC_ALL=C awk -v m="$ALLOW_MARKER" 'NR<=40 && index($0,m){f=1} END{exit f?0:1}' && return 0
+  git show ":./$1.allow-committed" 2>/dev/null \
+    | LC_ALL=C awk -v m="$ALLOW_MARKER" 'index($0,m){f=1} END{exit f?0:1}'
+}
+seen=0 flagged=0
+while IFS= read -r -d '' c; do
+  seen=1; p="${c#./}"
+  if [ "$IS_GIT" = 1 ]; then
+    if git ls-files --error-unmatch -- "$c" >/dev/null 2>&1; then
+      if allowed_committed "$p"; then
+        skip "committed by declared exception: $p"
+      else
+        # "tracked", not "COMMITTED" (B99): ls-files answers from the INDEX, which
+        # also holds files staged but never yet committed — don't overstate the state.
+        fail "possible secret is tracked by git (committed or staged): $p"; flagged=1
+      fi
+    elif git check-ignore -q -- "$c"; then
+      # Ignored — but by WHOSE rule (B24)? "Safe" is an ALLOWLIST, not a blocklist:
+      # only a rule in a TRACKED .gitignore whose pattern is in the INDEX blob travels
+      # with a clone. A relative core.excludesFile in .git/config echoes a relative
+      # source that a blocklist called repo-local; an untracked .gitignore, or a rule
+      # only in the worktree copy of a tracked one, is the same mid-remediation shape
+      # B60 closed for the allow-marker (add rule, see green, forget to commit).
+      # ign_resolve parses check-ignore's -z output — see the helper (L3/L4: the
+      # colon format C-quotes non-ASCII source paths and desyncs on in-path colons).
+      # In-tree .gitignore sources are echoed relative to the REPO ROOT whatever the
+      # cwd, so the tracked/index reads anchor there (-C toplevel) — resolving them
+      # from a monorepo-subdirectory target's cwd false-warned on a committed
+      # parent-root rule. Every misjudgment here warns, never writes.
+      ign_resolve "$c" || true
+      # Same out-of-repo pre-screen as the settings arm above (convergence M2): a
+      # machine-local core.excludesFile can be NAMED .gitignore, and check-ignore
+      # echoes its ABSOLUTE path — which slipped the basename allowlist into
+      # remedies that cannot run (`git add` on an out-of-tree file; blob_has_rule's
+      # `:./` pathspec on an absolute path is a fatal, so the "commit the rule"
+      # advice never cleared even when the pointed-at in-repo file WAS committed).
+      case "$ignsrc" in
+        ""|/*|.git/*) warn "possible secret ignored only by a rule that does not travel with a clone (${ignsrc:-unknown source}): $p"; flagged=1 ;;
+        *)
+          case "${ignsrc##*/}" in
+            .gitignore)
+              # Same B135 screen as slot_probe: a relative in-repo core.excludesFile
+              # named .gitignore slips the basename allowlist while its .git/config
+              # pointer travels with no clone — re-ask with it neutralized and let a
+              # changed answer convict the config.
+              osrc="$ignsrc"; opat="$ignpat"
+              ign_resolve "$c" noexcl || true
+              if [ "$ignsrc" != "$osrc" ] || [ "$ignpat" != "$opat" ]; then
+                warn "possible secret ignored only via core.excludesFile ($osrc) — the .git/config pointer does not travel with a clone: $p"; flagged=1
+              else
+              gtop="$(git rev-parse --show-toplevel 2>/dev/null)"
+              if ! git -C "$gtop" ls-files --error-unmatch -- "$ignsrc" >/dev/null 2>&1; then
+                warn "possible secret ignored by UNTRACKED ${ignsrc:-.gitignore} — the rule does not travel with a clone: $p"; flagged=1
+              else
+                # blob_has_rule (not a bare `| grep -qx`): END-flag consume-all plus the
+                # parsed-vs-raw normalization and the ENVIRON pattern hand-off — see the
+                # helper (B108/B114, convergence K3/K4/L2).
+                if blob_has_rule "$gtop" "$ignsrc" "$ignpat"; then
+                  :   # ignored by a committed .gitignore rule — travels with a clone
+                else
+                  warn "possible secret ignored by a rule present only in the WORKTREE copy of $ignsrc — commit the rule: $p"; flagged=1
+                fi
+              fi
+              fi ;;
+            *) warn "possible secret ignored only by a rule that does not travel with a clone (${ignsrc:-unknown source}): $p"; flagged=1 ;;
+          esac ;;
+      esac
+    else warn "possible secret not gitignored (at risk): $p"; flagged=1; fi
+  else warn "possible secret present, can't verify (not a git repo): $p"; flagged=1; fi
+# Name net (B24): the stock private-key filenames beyond id_rsa (id_ed25519, id_ecdsa,
+# id_dsa, plus ssh-keygen's FIDO defaults id_ed25519_sk / id_ecdsa_sk — their .pub
+# halves are public by definition and stay out), and the .env.* variants (.env.local,
+# .env.production) alongside *.env — minus the skeleton suffixes
+# *.example/*.sample/*.template/*.dist, which exist to be committed with placeholder
+# values (a repo may track a .env.example on purpose).
+done < <(find . \( -path ./.git -o -name node_modules -o -name .venv -o -name vendor \) -prune -o -type f \
+          \( -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' -o -iname '*.pfx' \
+             -o -iname 'id_rsa' -o -iname 'id_ed25519' -o -iname 'id_ecdsa' -o -iname 'id_dsa' \
+             -o -iname 'id_ed25519_sk' -o -iname 'id_ecdsa_sk' \
+             -o -iname '*.env' \
+             -o \( -iname '.env.*' ! -iname '*.example' ! -iname '*.sample' ! -iname '*.template' ! -iname '*.dist' \) \
+             -o -path '*/secrets/*' -o -path '*/secret/*' \) -print0 2>/dev/null)
+
+# The find walk sees only the WORKTREE — a tracked secret deleted with a plain `rm`
+# (its blob very much still in the index and history) never enumerates, and the section
+# stays green: the same false-green shape B60 closed, one level up (B94). Union the
+# INDEX view in: tracked paths matching the same name patterns whose worktree file is
+# gone get the same committed-state judgment. Keep secret_name() in lockstep with the
+# find predicates above, and the prune list in lockstep too — a vendored dependency's
+# fixture stays out of scope no matter which walk would have seen it.
+secret_name(){
+  case "$1" in */secrets/*|secrets/*|*/secret/*|secret/*) return 0 ;; esac
+  local bn="${1##*/}"; bn="${bn,,}"
+  case "$bn" in *.pem|*.key|*.p12|*.pfx|id_rsa|id_ed25519|id_ecdsa|id_dsa|id_ed25519_sk|id_ecdsa_sk|*.env) return 0 ;; esac
+  case "$bn" in *.example|*.sample|*.template|*.dist) return 1 ;; esac   # skeleton files (B24)
+  case "$bn" in .env.*) return 0 ;; esac
+  return 1
+}
+if [ "$IS_GIT" = 1 ]; then
+  while IFS= read -r -d '' f; do
+    case "$f" in node_modules/*|*/node_modules/*|.venv/*|*/.venv/*|vendor/*|*/vendor/*) continue ;; esac
+    secret_name "$f" || continue
+    if [ -e "$f" ] || [ -L "$f" ]; then continue; fi   # present — the find walk judged it
+    seen=1
+    if allowed_committed "$f"; then
+      skip "committed by declared exception: $f (deleted from worktree)"
+    else
+      # Same B99 wording as the find-walk branch: the index also holds staged-only blobs.
+      fail "possible secret is tracked by git (committed or staged): $f (deleted from worktree — the blob is still in the index)"; flagged=1
+    fi
+  done < <(git ls-files -z 2>/dev/null)
+fi
+# The PASS strings say what was checked (B143): names and paths, never content or history.
+# three migrated repos read green here over pushed content hazards — a
+# secret in a PDF and screenshots, a licence-key ledger, copies of another repo's records.
+if [ "$seen" = 0 ]; then pass "no secret-like filenames present (content and history are not inspected)"
+elif [ "$flagged" = 0 ]; then pass "no undeclared secret-like filenames exposed (content and history are not inspected)"; fi
+
+# --- archetype slots ----------------------------------------------------------
+sect "archetype"
+if [ "$SOURCE" = 1 ]; then
+  skip "standard source repo — archetype slots not applicable"
+elif [ "$ARCH" = vendor-derived ]; then
+  if [ -d docs/reference ]; then pass "docs/reference/ present"; else warn "vendor-derived: docs/reference/ missing"; fi
+  # The register's slot is docs/official/ since 0.3.26 (D47); a root copy is the old layout, not a pass.
+  if [ -f docs/official/DEVIATIONS.md ]; then pass "docs/official/DEVIATIONS.md present"
+  elif [ -f DEVIATIONS.md ]; then warn "vendor-derived: DEVIATIONS.md is at the root — its slot is docs/official/ since 0.3.26 (D47): git mv it there and leave a pointer where a build or a reader expects it"
+  else warn "vendor-derived: docs/official/DEVIATIONS.md missing"; fi
+  # The register's tool (F17, 0.4.0), the same way the tracker's is judged: the repo's own
+  # copy first, else the standard's canonical one with a note saying so (B78's rule).
+  REG=() REGNOTE=""
+  if [ -f bin/register ] && [ -x bin/register ]; then REG=("$ROOT/bin/register"); pass "bin/register present + executable"
+  else
+    if [ -d bin/register ]; then REGNOTE="bin/register exists but is a DIRECTORY — clear it and run sync"
+    elif [ -f bin/register ]; then REGNOTE="bin/register present but not executable — fix with chmod +x"
+    elif [ -e bin/register ] || [ -L bin/register ]; then REGNOTE="bin/register exists but is not a usable executable file — clear it and run sync"
+    else REGNOTE="bin/register missing — run sync to install it"; fi
+    warn "$REGNOTE (checking with the template's copy meanwhile)"
+    [ -f "$TEMPLATE/bin/register" ] && REG=(bash "$TEMPLATE/bin/register")
+  fi
+  if [ -f docs/official/DEVIATIONS.md ] && [ "${#REG[@]}" -gt 0 ]; then
+    # register check is read-only (it renders into a temp dir outside the tree). Judged by
+    # its own words, not only its exit status (B27+B33's rule): not migrated, stale, or
+    # invalid each get their own remedy. The temp prefix never appears in its messages.
+    rrc=0; rmsg="$(REGISTER_FILE="$ROOT/docs/official/DEVIATIONS.md" "${REG[@]}" check 2>&1)" || rrc=$?
+    if [ "$rrc" -eq 0 ] && printf '%s' "$rmsg" | grep -q 'not yet migrated'; then
+      warn "docs/official/DEVIATIONS.md is not yet in the register's entry form (no <!-- register:begin --> marker) — add the types and sources tables, a header line per entry and the marker pair, then run bin/register render"
+    elif [ "$rrc" -eq 0 ] && printf '%s' "$rmsg" | grep -q 'valid and up to date'; then
+      pass "register valid; its summary and DEVIATIONS.html up to date"
+    elif [ "$rrc" -ne 0 ] && printf '%s' "$rmsg" | grep -q 'STALE'; then
+      # A FAIL, like a stale tracker.html: a committed generated view out of step with its
+      # source (decided 2026-10-01). What cannot be judged, or is not migrated, stays a WARN.
+      fail "register summary or DEVIATIONS.html is stale — run bin/register render, then commit both"
+    elif [ "$rrc" -ne 0 ] && printf '%s' "$rmsg" | grep -q 'problem(s) in'; then
+      rfirst="${rmsg%%$'\n'*}"; rfirst="${rfirst//"$ROOT"\//}"
+      warn "register fails validation: $(printf '%s\n' "$rmsg" | grep -c ':[0-9][0-9]*: ') problem(s), first: $rfirst — run bin/register check"
+    else
+      warn "bin/register check gave no verdict (exit $rrc): $(printf '%s\n' "$rmsg" | head -n 1) — a tool problem, not proven register trouble"
+    fi
+    # Citations (spec § 2): a citation of an entry that does not exist is an error; the
+    # page's citation list drifting from the live files is a warning. Closed-entry
+    # citations are deliberate as often as not (they stay warnings inside map's own output).
+    if [ "$rrc" -eq 0 ] && printf '%s' "$rmsg" | grep -q 'valid and up to date' && [ "$IS_GIT" = 1 ]; then
+      mrc=0; mmsg="$(REGISTER_FILE="$ROOT/docs/official/DEVIATIONS.md" "${REG[@]}" map --check 2>&1)" || mrc=$?
+      if [ "$mrc" -ne 0 ]; then
+        warn "register citations name entries that do not exist: $(printf '%s\n' "$mmsg" | grep -c '^  error ') citation(s) — run bin/register map"
+      elif printf '%s' "$mmsg" | grep -q 'are out of date'; then
+        warn "DEVIATIONS.html lists citations that no longer match the files — run bin/register render"
+      else
+        pass "register citations all name existing entries"
+      fi
+    fi
+  fi
+elif [ "$ARCH" = authored ]; then
+  if [ -d docs/reference ] || [ -f docs/official/DEVIATIONS.md ] || [ -f DEVIATIONS.md ] || [ -e bin/register ]; then
+    warn "authored repo has vendor-derived slots (docs/reference, DEVIATIONS.md or bin/register) — archetype mismatch?"
+  else pass "no vendor-derived slots (correct for authored)"; fi
+else skip "archetype unknown (pass --authored/--vendor-derived or run init to stamp)"; fi
+
+# --- version stamp ------------------------------------------------------------
+sect "stamp"
+if [ "$SOURCE" = 1 ]; then
+  skip "standard source repo — no stamp expected"
+  # A release exists when a clone can NAME it (B87): a committed VERSION bump with no
+  # matching git tag leaves B43's rollback hazard undiagnosable from any checkout.
+  # WARN, never FAIL — a --no-tags or shallow clone legitimately carries no tags.
+  # Read the INDEX blob (B60's discipline: committed-state judgments never read the
+  # worktree) — a mid-bump worktree VERSION has no tag to demand yet.
+  if [ "$IS_GIT" = 1 ]; then
+    relver="$(git show :./VERSION 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+    if [ -n "$relver" ]; then
+      git rev-parse -q --verify "refs/tags/v$relver" >/dev/null 2>&1 \
+        || warn "no git tag v$relver for the committed VERSION — tag the release commit"
+    elif git ls-files --error-unmatch -- VERSION >/dev/null 2>&1; then
+      # Tracked but yields nothing: don't silently skip the check on a broken input.
+      warn "tracked VERSION is empty or unreadable — cannot check for a release tag"
+    fi   # VERSION untracked: nothing released from this tree yet, no tag to expect
+  fi
+elif [ -f .repo-standard-version ]; then
+  # A stamp whose archetype is '(unknown)' silently skipped every archetype check
+  # while the stamp line itself PASSed (B31) — call the degradation out. And when an
+  # explicit flag contradicts what the stamp records, the report should not be a
+  # self-consistent-looking green built on the flag alone (B76).
+  stampline="$(head -n 1 .repo-standard-version 2>/dev/null)"
+  case "$stampline" in
+    *"(vendor-derived)"*"(authored)"*|*"(authored)"*"(vendor-derived)"*)
+      warn "stamp names BOTH archetypes ('$stampline') — re-run init with the right flag to restore it (--allow-dirty if the tree is dirty)" ;;
+    *"(authored)"*|*"(vendor-derived)"*) pass "stamped: $stampline" ;;
+    *"(unknown)"*) warn "stamp records archetype '(unknown)' — archetype checks ran only if you passed a flag; re-run init --authored|--vendor-derived to record it (--allow-dirty if the tree is dirty)" ;;
+    *) warn "stamp is malformed ('$stampline') — re-run init (--allow-dirty if the tree is dirty) or sync to restore it" ;;
+  esac
+  if [ -n "$ARCHFLAG" ] && [ -n "$STAMPARCH" ] && [ "$ARCHFLAG" != "$STAMPARCH" ]; then
+    warn "--$ARCHFLAG contradicts the stamp's ($STAMPARCH) — the archetype checks above used the flag; fix the stamp (re-run init) or drop the flag"
+  fi
+else warn ".repo-standard-version missing (run init, or sync once built)"; fi
+
+# --- verdict ------------------------------------------------------------------
+# ONE verdict line carries the counts AND both qualifiers (B142): the note and the strict
+# marker used to follow on lines of their own, so `tail -1` kept only the marker and a
+# `grep passed` dropped the note — twenty steps of the 2026-09-11 rehearsal read the verdict
+# one of those two ways. The qualifiers appear under exactly the old conditions, and the
+# exit codes are unchanged.
+# A green verdict describes the WORKTREE. Say so whenever that is not also the committed
+# state (B66): both rehearsal migrations reported 16/0/0 while zero bytes were committed.
+qual=""
+if [ "$IS_GIT" = 1 ] && [ -n "$(git status --porcelain 2>/dev/null | head -n 1)" ]; then
+  qual=" — note: uncommitted changes present, so this verdict describes the worktree, not any commit"
+fi
+if [ "$fails" -eq 0 ] && [ -n "$STRICT" ] && [ "$warns" -gt 0 ]; then qual="$qual (--strict: warnings fail)"; fi
+printf '\n%s%s passed, %s warnings, %s failures%s%s\n' "$D" "$passes" "$warns" "$fails" "$qual" "$N"
+if [ "$fails" -gt 0 ]; then exit 1; fi
+if [ -n "$STRICT" ] && [ "$warns" -gt 0 ]; then exit 1; fi
+exit 0

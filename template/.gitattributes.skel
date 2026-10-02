@@ -1,0 +1,11 @@
+# repo-standard machinery must stay LF on every platform — a CRLF checkout puts \r on
+# the shebang line and every hook dies with exit 127. These lines pin only the
+# standard's scripts; set your own policy for the rest of the repo as you see fit.
+.claude/hooks/* text eol=lf
+.githooks/* text eol=lf
+bin/track text eol=lf
+bin/register text eol=lf
+# The tracker-hwm sidecar is data, not a script, but a CRLF checkout used to zero its
+# recorded high-water marks and re-mint deleted IDs (B47). Unpathed on purpose: the
+# sidecar lives next to whatever TRACKER_FILE points at, so the pin must match at any depth.
+tracker-hwm text eol=lf

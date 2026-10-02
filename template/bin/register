@@ -1,0 +1,851 @@
+#!/usr/bin/env bash
+# Managed by repo-standard: read REPO-STANDARD.md at the repo root before editing, moving or
+# deleting this file. sync replaces it from the standard.
+# register — checks and renders a vendor-derived repo's deviations register,
+# docs/official/DEVIATIONS.md (spec: repo-standard docs/AI/design/register-script-spec.md).
+#   register check     # validate the register; exit 1 on problems, or STALE when the
+#                      # summary block or DEVIATIONS.html needs a render
+#   register render    # rewrite the summary block between the markers + DEVIATIONS.html
+#   register map [--entry N | --file PATH] [--all] [--check]
+#                      # list where `register N` is cited; --check exits 1 on a citation
+#                      # of an entry that does not exist
+# The prose stays hand-written: the tool reads the types table, the sources table, the
+# `## N. Title` entry headings and the header line under each, and generates only the
+# summary block and the page. Every byte outside the markers is kept.
+# Register resolution order: $REGISTER_FILE; the repo the INVOKED copy lives in
+# ($0/../docs/official/DEVIATIONS.md); the cwd's git root. Source paths resolve against the
+# register's folder, or against $REGISTER_BASE when set (the pre-commit hook's staged copy). A register without a
+# `<!-- register:begin` marker is not yet migrated: check says so and passes, render refuses.
+# Portable: bash (>= 4) + awk + coreutils, plus git for the citations. No jq. Never
+# commits (you gate that).
+set -euo pipefail
+[ "${BASH_VERSINFO[0]:-0}" -ge 4 ] || { printf 'register: requires bash >= 4 (stock macOS ships 3.2; brew install bash)\n' >&2; exit 1; }
+
+# Temp files and the write lock are cleaned on ANY exit, as in track (B26).
+TMPF=() TMPD="" LOCKDIR="" CREC="" CSCOPE=""
+cleanup(){
+  [ "${#TMPF[@]}" -gt 0 ] && rm -f "${TMPF[@]}" 2>/dev/null
+  [ -n "$TMPD" ] && rm -rf "$TMPD" 2>/dev/null
+  [ -n "$LOCKDIR" ] && rmdir "$LOCKDIR" 2>/dev/null
+  :
+}
+trap cleanup EXIT
+
+err() { printf 'register: %s\n' "$*" >&2; exit 1; }
+# JS double-quoted string literal from arbitrary text — track's jsstr, unchanged (B81).
+jsstr() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//</\\u003c}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}; printf '"%s"' "$s"; }
+
+# One writer at a time: mkdir is the portable atomic test-and-set (track's B46/B112).
+take_lock(){
+  local lock="$FILE.lock" i=0
+  until mkdir "$lock" 2>/dev/null; do
+    if [ ! -e "$lock" ] && [ ! -w "$(dirname -- "$FILE")" ]; then
+      err "cannot create $FILE.lock — the register's directory is not writable"
+    fi
+    i=$((i+1))
+    [ "$i" -lt 50 ] || err "register is locked by another register run ($FILE.lock exists — stale? rmdir it)"
+    sleep 0.1
+  done
+  LOCKDIR="$lock"
+}
+
+# ── Locate the register ───────────────────────────────────────────────────────────────
+resolve_file() {
+  if [ -n "${REGISTER_FILE:-}" ]; then FILE="$REGISTER_FILE"
+  else
+    # The INVOKED copy names the repo, as in track (B19); $0 is not resolved through
+    # symlinks, so a symlinked copy names the repo it is linked from.
+    local sroot="" root=""
+    sroot="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
+    root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$sroot" ] && [ -f "$sroot/docs/official/DEVIATIONS.md" ]; then FILE="$sroot/docs/official/DEVIATIONS.md"
+    elif [ -n "$root" ] && [ -f "$root/docs/official/DEVIATIONS.md" ]; then FILE="$root/docs/official/DEVIATIONS.md"
+    else FILE="${root:+$root/docs/official/DEVIATIONS.md}"
+    fi
+  fi
+  [ -n "${FILE:-}" ] && [ -f "$FILE" ] || err "register not found: ${FILE:-<none>} (set REGISTER_FILE, or run inside a repo with docs/official/DEVIATIONS.md)"
+  # A raw US byte is refused outright, as in track (B85): the records below use 0x1f
+  # as their field separator, so one inside the register would shift every later field.
+  local us; us="$(LC_ALL=C awk 'index($0,"\037"){print NR; exit}' "$FILE")"
+  [ -z "$us" ] || err "$FILE line $us: raw 0x1f (US) byte — the parser uses it as its field separator; remove it first"
+  HTML="$(dirname -- "$FILE")/DEVIATIONS.html"
+}
+
+# ── Parse ─────────────────────────────────────────────────────────────────────────────
+# One pass over the register, in the C locale so lengths and offsets are bytes whatever
+# the caller's locale. Emits 0x1f-separated records on stdout:
+#   H title                       the H1 (page title)
+#   M nbegin nend begin end       marker counts and line numbers
+#   T line type meaning           a types-table row
+#   S line key doc version date path
+#   N line num title type status original updated source
+#   E line message                a problem (sorted by line before printing)
+# Fenced blocks are skipped type-aware, as in track (B84): an example quoted in the prose
+# never counts as an entry, a header, a table row or a marker. Lines between the markers
+# are generated output and are never parsed as input either.
+read -r -d '' PARSER <<'AWK' || true
+function trim(x){ gsub(/^[ \t]+|[ \t]+$/,"",x); return x }
+function out(a,b,c,d,e,f,g,h,i){ print a "\037" b "\037" c "\037" d "\037" e "\037" f "\037" g "\037" h "\037" i }
+function prob(ln,msg){ out("E",ln,msg) }
+function isdate(d,  y,m,dd,mx){
+  if(d !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) return 0
+  y=substr(d,1,4)+0; m=substr(d,6,2)+0; dd=substr(d,9,2)+0
+  if(m<1 || m>12 || dd<1) return 0
+  mx=(m==2)?(((y%4==0 && y%100!=0) || y%400==0)?29:28):((m==4||m==6||m==9||m==11)?30:31)
+  return dd<=mx
+}
+# Split a pipe-table row into C[1..n]; an escaped \| stays inside its cell, restored as |.
+function cells(l,  n,i){
+  gsub(/\\\|/,"\001",l); sub(/^\|/,"",l); sub(/\|[ \t]*$/,"",l)
+  n=split(l,C,"|")
+  for(i=1;i<=n;i++){ gsub(/\001/,"|",C[i]); C[i]=trim(C[i]) }
+  return n
+}
+function blank(l){ return l ~ /^[ \t]*$/ }
+# A line that starts a new block: the header paragraph must end before one (spec § 1.5).
+# A setext underline or a thematic break (---, ===, ***, ___) would turn or cut the header too.
+function blockstart(l){ return l ~ /^ {0,3}([-*+][ \t]|[0-9]+[.)][ \t]|#|>|<|\||```|~~~)/ || l ~ /^ {0,3}([-*+]|-+|=+|\*\*\*+|___+)[ \t]*$/ }
+{ sub(/\r$/,""); L[NR]=$0 }
+END{
+  SEP=" · "; MID="·"
+  fc=""
+  for(i=1;i<=NR;i++){
+    l=L[i]
+    if(l ~ /^ {0,3}(```|~~~)/){ t=(l ~ /^ {0,3}~~~/)?"t":"b"; if(fc=="")fc=t; else if(fc==t)fc=""; F[i]=1; continue }
+    F[i]=(fc!="")
+  }
+  nb=0; ne=0; mb=0; me=0
+  for(i=1;i<=NR;i++){ if(F[i]) continue
+    if(L[i] ~ /^<!-- register:begin/){ nb++; if(!mb) mb=i }
+    else if(L[i] ~ /^<!-- register:end/){ ne++; if(!me) me=i } }
+  out("M",nb,ne,mb,me)
+  if(nb==0) exit
+  if(nb>1) prob(mb,"more than one '<!-- register:begin' marker (" nb ")")
+  if(ne!=1) prob(me?me:mb, (ne==0) ? "no '<!-- register:end -->' marker" : "more than one '<!-- register:end' marker (" ne ")")
+  if(nb==1 && ne==1 && me<mb) prob(me,"'<!-- register:end -->' comes before '<!-- register:begin'")
+  inblk=0; sec=""; ntsec=0; nssec=0; title=""; last=0
+  for(i=1;i<=NR;i++){
+    if(F[i]) continue
+    l=L[i]
+    if(nb==1 && ne==1 && mb<me){ if(i==mb){ inblk=1; continue } if(i==me){ inblk=0; continue } if(inblk) continue }
+    if(l ~ /^<!-- register:(begin|end)/) continue
+    if(l ~ /^# / && title==""){ title=trim(substr(l,3)) }
+    if(l ~ /^##? /){
+      if(l ~ /^## / && i>1 && !blank(L[i-1])) prob(i,"no blank line before this heading (Okular nests a heading that follows a line directly)")
+      sec="other"
+      if(l ~ /^## Types[ \t]*$/){ sec="types"; ntsec++; trow=0; if(ntsec>1) prob(i,"a second '## Types' section") }
+      else if(l ~ /^## Sources[ \t]*$/){ sec="sources"; nssec++; srow=0; if(nssec>1) prob(i,"a second '## Sources' section") }
+      else if(l ~ /^## [0-9]/){
+        if(l !~ /^## [1-9][0-9]*\. +[^ \t]/){ prob(i,"malformed entry heading: expected '## N. Title' (N a whole number from 1, no leading zero)"); continue }
+        n=l; sub(/^## /,"",n); sub(/\..*$/,"",n)
+        if(length(n)>9){ prob(i,"entry number " n " is longer than 9 digits"); continue }
+        n+=0; et=l; sub(/^## [0-9]+\. +/,"",et); et=trim(et)
+        if(n in SEEN) prob(i,"entry " n " is numbered twice (first at line " SEEN[n] ")")
+        else { SEEN[n]=i; if(n<last) prob(i,"entry " n " is out of order: it follows entry " last) }
+        if(n>last) last=n
+        header(i,n,et)
+      }
+      continue
+    }
+    if(sec=="types" && l ~ /^\|/){ trow++
+      k=cells(l)
+      if(trow==1){ if(k!=2 || C[1]!="Type" || C[2]!="Meaning") prob(i,"the types table header must be '| Type | Meaning |'"); continue }
+      if(trow==2) continue
+      if(k!=2){ prob(i,"types row has " k " cells, expected 2"); continue }
+      ty=C[1]
+      if(ty==""){ prob(i,"types row has an empty Type"); continue }
+      if(index(ty,MID) || index(ty,"|")){ prob(i,"type '" ty "' contains '·' or '|'"); continue }
+      if(ty in TY){ prob(i,"type '" ty "' is defined twice (first at line " TY[ty] ")"); continue }
+      TY[ty]=i; out("T",i,ty,C[2])
+      continue
+    }
+    if(sec=="sources" && l ~ /^\|/){ srow++
+      k=cells(l)
+      if(srow==1){ if(k!=5 || C[1]!="Key" || C[2]!="Document" || C[3]!="Version" || C[4]!="Date" || C[5]!="Path") prob(i,"the sources table header must be '| Key | Document | Version | Date | Path |'"); continue }
+      if(srow==2) continue
+      if(k!=5){ prob(i,"sources row has " k " cells, expected 5"); continue }
+      key=C[1]
+      if(key !~ /^[A-Za-z][A-Za-z0-9-]*$/){ prob(i,"source key '" key "' must be a letter followed by letters, digits or hyphens"); continue }
+      if(key in KEY){ prob(i,"source key '" key "' is defined twice (first at line " KEY[key] ")"); continue }
+      KEY[key]=i
+      if(C[5]==""){ prob(i,"source '" key "' has no Path"); continue }
+      if(C[5] ~ /^\//){ prob(i,"source '" key "' Path must be relative to the register's folder, not absolute"); continue }
+      out("S",i,key,C[2],C[3],C[4],C[5])
+      continue
+    }
+  }
+  if(ntsec==0) prob(mb,"no '## Types' section (a migrated register declares its types in a table under it)")
+  if(nssec==0) prob(mb,"no '## Sources' section (a migrated register declares its sources in a table under it)")
+  for(u=1;u<=nut;u++) if(!(UT[u] in TY)) prob(UTL[u],"entry " UTN[u] ": type '" UT[u] "' is not in the types table")
+  for(u=1;u<=nuk;u++) if(!(UK[u] in KEY)) prob(UKL[u],"entry " UKN[u] ": source key '" UK[u] "' is not in the sources table")
+  if(title!="") out("H",title)
+}
+# The header line: the first paragraph under the entry heading, which may wrap; a blank
+# line ends it (spec § 1.5). Fields in order, ' · '-separated, labels in *…:* form.
+function header(h,n,et,  j,s,e,txt,lbl,rest,pos,val,V,f,a,na,q,it,key,loc,pd){
+  for(j=h+1;j<=NR && blank(L[j]) && !F[j];j++);
+  if(j>NR || F[j] || L[j] !~ /^\*Type:\*/){ prob(h,"entry " n ": no header line (the first paragraph under the heading must start with '*Type:*')"); return }
+  s=j; txt=trim(L[j])
+  for(j=s+1;j<=NR && !blank(L[j]) && !F[j];j++){
+    if(blockstart(L[j])){ prob(j,"entry " n ": no blank line after the header line (this line starts a new block; without the blank line it is swallowed into the header)"); break }
+    txt=txt " " trim(L[j])
+  }
+  split("Type Status Original Updated Source",lbl," ")
+  rest=txt
+  for(f=1;f<=5;f++){
+    rest=trim(rest)
+    if(index(rest,"*" lbl[f] ":*")!=1){ prob(s,"entry " n ": expected '*" lbl[f] ":*' as field " f " of the header (fields: Type · Status · Original · Updated · Source)"); return }
+    rest=substr(rest,length("*" lbl[f] ":*")+1)
+    if(f<5){ pos=index(rest,SEP); if(!pos){ prob(s,"entry " n ": no ' · ' after the " lbl[f] " field"); return }
+             V[f]=trim(substr(rest,1,pos-1)); rest=substr(rest,pos+length(SEP)) }
+    else V[f]=trim(rest)
+  }
+  if(V[1]==""){ prob(s,"entry " n ": empty Type") ; return }
+  nut++; UT[nut]=V[1]; UTL[nut]=s; UTN[nut]=n
+  if(V[2]!="active" && V[2]!="moot" && V[2]!="closed"){ prob(s,"entry " n ": Status '" V[2] "' is not active, moot or closed"); return }
+  if(!isdate(V[3])){ prob(s,"entry " n ": Original '" V[3] "' is not a YYYY-MM-DD date"); return }
+  if(V[4]!="—"){
+    na=split(V[4],a,", "); pd=""
+    for(q=1;q<=na;q++){
+      if(!isdate(a[q])){ prob(s,"entry " n ": Updated '" a[q] "' is not a YYYY-MM-DD date (dates are separated by ', '; '—' for none)"); return }
+      if(pd!="" && a[q]<=pd){ prob(s,"entry " n ": Updated dates are not in ascending order (" pd " then " a[q] ")"); return }
+      pd=a[q]
+    }
+  }
+  # 'none' stands alone: anything after it is most often the next paragraph, glued on
+  # because the blank line after the header is missing.
+  if(V[5] ~ /^none[ \t;]/){ prob(s,"entry " n ": Source 'none' must stand alone (is the paragraph after the header missing its blank line?)"); return }
+  if(V[5]!="none"){
+    na=split(V[5],a,"; ")
+    for(q=1;q<=na;q++){
+      it=a[q]; pos=index(it," ")
+      key=pos?substr(it,1,pos-1):it; loc=pos?trim(substr(it,pos+1)):""
+      if(key !~ /^[A-Za-z][A-Za-z0-9-]*$/ || loc==""){ prob(s,"entry " n ": Source item '" it "' is not '<key> <location>' (items are separated by '; '; 'none' when no vendor document addresses the point)"); return }
+      nuk++; UK[nuk]=key; UKL[nuk]=s; UKN[nuk]=n
+    }
+  }
+  out("N",h,n,et,V[1],V[2],V[3],V[4],V[5])
+}
+AWK
+
+# parse → globals: TITLE, NB/MB/ME, arrays of records, PROBS (sorted "line<TAB>msg").
+parse() {
+  local kind a b c d e f g h
+  TITLE="" NB=0 MB=0 ME=0
+  TYPES_R=() SOURCES_R=() ENTRIES_R=() PROBS=()
+  local PBASE="${REGISTER_BASE:-$(dirname -- "$FILE")}"
+  local probs="" recs
+  recs="$(LC_ALL=C awk "$PARSER" "$FILE")" || err "the parser failed on $FILE (awk exit $?)"
+  while IFS=$'\037' read -r kind a b c d e f g h; do
+    [ -n "$kind" ] || continue
+    case "$kind" in
+      H) TITLE="$a" ;;
+      M) NB="$a" MB="$c" ME="$d" ;;   # $b, the end-marker count, is checked in the parser
+      T) TYPES_R+=("$a"$'\037'"$b"$'\037'"$c") ;;
+      S) SOURCES_R+=("$a"$'\037'"$b"$'\037'"$c"$'\037'"$d"$'\037'"$e"$'\037'"$f")
+         # Paths are checked here (awk has no portable file test), relative to the
+         # register's folder — or to $REGISTER_BASE, which the pre-commit hook sets to the
+         # worktree register's folder while it checks a staged copy from a temp dir.
+         [ -e "$PBASE/$f" ] || probs+="$a"$'\t'"source '$b' Path does not exist: $f (relative to $PBASE)"$'\n' ;;
+      N) ENTRIES_R+=("$a"$'\037'"$b"$'\037'"$c"$'\037'"$d"$'\037'"$e"$'\037'"$f"$'\037'"$g"$'\037'"$h") ;;
+      E) probs+="$a"$'\t'"$b"$'\n' ;;
+    esac
+  done <<<"$recs"
+  [ -n "$probs" ] && mapfile -t PROBS < <(printf '%s' "$probs" | sort -s -t$'\t' -k1,1n)
+  :
+}
+
+print_probs() {
+  local p
+  for p in "${PROBS[@]}"; do printf '%s:%s: %s\n' "$FILE" "${p%%$'\t'*}" "${p#*$'\t'}" >&2; done
+  printf 'register: %d problem(s) in %s\n' "${#PROBS[@]}" "$FILE" >&2
+}
+
+# Table cell: escape a bare | (an already escaped \| is kept as it is).
+cell() {
+  local s=$1 o="" ch prev=""
+  while [ -n "$s" ]; do
+    ch="${s:0:1}"; s="${s:1}"
+    if [ "$ch" = "|" ] && [ "$prev" != "\\" ]; then o+="\\|"; else o+="$ch"; fi
+    prev="$ch"
+  done
+  printf '%s' "$o"
+}
+
+# ── Generate: the summary block and the page, into the two paths given ─────────────────
+generate() {  # $1 = new register path, $2 = new DEVIATIONS.html path
+  local newreg=$1 newhtml=$2 r n t ty st og up so cr=""
+  local IFS0=$IFS
+  # A CRLF register gets CRLF block lines, so the file does not end up with mixed endings.
+  if LC_ALL=C sed -n "${MB}p" "$FILE" | LC_ALL=C grep -q $'\r$'; then cr=$'\r'; fi
+  {
+    head -n "$MB" "$FILE"
+    printf '%s\n' "$cr"
+    printf '| # | Deviation | Type | Status | Original | Updated | Source |%s\n' "$cr"
+    # Plain dashes, no alignment colons (B150): an aligned cell carries an inline style, and
+    # ReText's default preview (Qt's rich-text engine) then drops its table border.
+    printf '| --- | --- | --- | --- | --- | --- | --- |%s\n' "$cr"
+    for r in "${ENTRIES_R[@]}"; do
+      IFS=$'\037' read -r _ n t ty st og up so <<<"$r"; IFS=$IFS0
+      printf '| %s | %s | %s | %s | %s | %s | %s |%s\n' "$n" "$(cell "$t")" "$(cell "$ty")" "$st" "$og" "$up" "$(cell "$so")" "$cr"
+    done
+    printf '%s\n' "$cr"
+    tail -n +"$ME" "$FILE"
+  } > "$newreg" || return 1
+
+  # The page's data block. The title comes from the register's own H1, so a render of a
+  # copy elsewhere (the pre-commit hook's staged copy) is byte-identical (track's B22).
+  local data="" k doc ver dat pth mean items it rest loc upd
+  data+="const META = {title:$(jsstr "${TITLE:-(untitled)}")};"$'\n'
+  data+="const TYPES = ["$'\n'
+  for r in "${TYPES_R[@]}"; do
+    IFS=$'\037' read -r _ ty mean <<<"$r"; IFS=$IFS0
+    data+="  {type:$(jsstr "$ty"),meaning:$(jsstr "$mean")},"$'\n'
+  done
+  data+="];"$'\n'"const SOURCES = ["$'\n'
+  for r in "${SOURCES_R[@]}"; do
+    IFS=$'\037' read -r _ k doc ver dat pth <<<"$r"; IFS=$IFS0
+    data+="  {key:$(jsstr "$k"),doc:$(jsstr "$doc"),version:$(jsstr "$ver"),date:$(jsstr "$dat"),path:$(jsstr "$pth")},"$'\n'
+  done
+  data+="];"$'\n'"const ENTRIES = ["$'\n'
+  for r in "${ENTRIES_R[@]}"; do
+    IFS=$'\037' read -r _ n t ty st og up so <<<"$r"; IFS=$IFS0
+    # Split as the parser does: Source items on '; ' (key, then the location after the
+    # first space), Updated dates on ', '.
+    items=""
+    if [ "$so" != "none" ]; then
+      rest="$so"
+      while :; do
+        it="${rest%%; *}"; loc="${it#* }"; loc="${loc#"${loc%%[! ]*}"}"; loc="${loc%"${loc##*[! ]}"}"
+        items+="{key:$(jsstr "${it%% *}"),loc:$(jsstr "$loc")},"
+        [ "$rest" = "$it" ] && break; rest="${rest#*; }"
+      done
+    fi
+    upd=""
+    if [ "$up" != "—" ]; then
+      rest="$up"
+      while :; do it="${rest%%, *}"; upd+="$(jsstr "$it"),"; [ "$rest" = "$it" ] && break; rest="${rest#*, }"; done
+    fi
+    data+="  {n:$n,title:$(jsstr "$t"),type:$(jsstr "$ty"),status:$(jsstr "$st"),original:$(jsstr "$og"),updated:[$upd],sources:[$items]},"$'\n'
+  done
+  data+="];"$'\n'"$(cites_js "$CSCOPE")"
+
+  local title; title="$(printf '%s' "${TITLE:-(untitled)}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')"
+  local datafile="$newhtml.data"; printf '%s\n' "$data" > "$datafile" || return 1
+  # Both substitutions ride ENVIRON and index/substr, never awk -v or gsub (track's B48/B49).
+  TITLEV="$title" DF="$datafile" awk '
+      /^\/\/__DATA__\/\/$/{ while((getline l < ENVIRON["DF"])>0) print l; close(ENVIRON["DF"]); next }
+      { out=""; rest=$0
+        while((i=index(rest,"__TITLE__"))>0){ out=out substr(rest,1,i-1) ENVIRON["TITLEV"]; rest=substr(rest,i+9) }
+        print out rest }' > "$newhtml" <<'HTML' || return 1
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>register — __TITLE__</title>
+<style>
+  *{box-sizing:border-box}
+  :root{
+    --bg:#eef0f3;--surface:#fff;--surface-2:#e7eaef;--raised:#f6f8fa;--border:#d5dae1;
+    --border-strong:#c2c9d3;--text:#1a2030;--text-dim:#59626f;--text-faint:#8b93a1;
+    --accent:#2f6f9f;--accent-ink:#1c5680;--accent-weak:#e3eef6;
+    --shadow:0 1px 2px rgba(20,30,45,.06),0 6px 20px rgba(20,30,45,.05);
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#101319;--surface:#191d25;--surface-2:#212631;--raised:#232a36;--border:#2f3743;
+    --border-strong:#3c4552;--text:#e7ebf1;--text-dim:#9aa4b2;--text-faint:#6b7686;
+    --accent:#6fb7e8;--accent-ink:#a7d3f2;--accent-weak:#182634;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28);}}
+  :root[data-theme="light"]{--bg:#eef0f3;--surface:#fff;--surface-2:#e7eaef;--raised:#f6f8fa;--border:#d5dae1;--border-strong:#c2c9d3;--text:#1a2030;--text-dim:#59626f;--text-faint:#8b93a1;--accent:#2f6f9f;--accent-ink:#1c5680;--accent-weak:#e3eef6;--shadow:0 1px 2px rgba(20,30,45,.06),0 6px 20px rgba(20,30,45,.05)}
+  :root[data-theme="dark"]{--bg:#101319;--surface:#191d25;--surface-2:#212631;--raised:#232a36;--border:#2f3743;--border-strong:#3c4552;--text:#e7ebf1;--text-dim:#9aa4b2;--text-faint:#6b7686;--accent:#6fb7e8;--accent-ink:#a7d3f2;--accent-weak:#182634;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.28)}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1100px;margin:0 auto;padding:26px 20px 64px}
+  .head{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 14px;margin-bottom:6px}
+  .head h1{font-size:20px;font-weight:650;letter-spacing:-.01em;margin:0}
+  .head .path{font-size:15px;color:var(--text-dim);font-weight:500}
+  .gen{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-faint);border:1px solid var(--border);border-radius:999px;padding:3px 9px}
+  .sub{color:var(--text-dim);font-size:12.5px;margin:6px 0 0;width:100%}
+  code{font-family:var(--mono);font-size:.92em;background:var(--surface-2);padding:1px 5px;border-radius:5px}
+  .toolbar{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);padding:12px 0 10px;margin:10px 0 4px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;border-bottom:1px solid var(--border)}
+  .search{flex:1 1 220px;display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:7px 11px;box-shadow:var(--shadow)}
+  .search:focus-within{border-color:var(--accent)}
+  .search svg{flex:none;opacity:.55}
+  .search input{border:0;outline:0;background:transparent;color:var(--text);font-family:var(--sans);font-size:13.5px;width:100%}
+  .sortbox{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-dim)}
+  .sortbox select{font-family:var(--sans);font-size:13px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 9px}
+  .btn{font-family:var(--mono);font-size:13px;color:var(--text);cursor:pointer;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+  .btn:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .count{font-size:12px;color:var(--text-faint);font-variant-numeric:tabular-nums;margin-left:auto}
+  .chips{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0 0;align-items:center}
+  .chips .lbl{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint);margin-right:2px;min-width:52px}
+  .chip{display:inline-flex;align-items:center;gap:7px;cursor:pointer;user-select:none;background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:4px 11px 4px 8px;font-size:12.5px;color:var(--text);font-family:inherit}
+  .chip:hover{border-color:var(--border-strong)}
+  .chip .dot{width:8px;height:8px;border-radius:50%;background:var(--sc);flex:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--sc) 20%,transparent)}
+  .chip .n{font-variant-numeric:tabular-nums;color:var(--text-dim);font-family:var(--mono);font-size:11.5px}
+  .chip.on{background:color-mix(in srgb,var(--sc) 14%,var(--surface));border-color:var(--sc)}
+  .chip.on .n{color:var(--text)}
+  .section{margin-top:18px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden}
+  .sec-head{display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--raised);border-bottom:1px solid var(--border)}
+  .sec-head h2{margin:0;font-size:14.5px;font-weight:620}
+  .sec-head .sec-n{font-family:var(--mono);font-size:11.5px;color:var(--text-faint);font-variant-numeric:tabular-nums;margin-left:auto}
+  table{width:100%;border-collapse:collapse}
+  thead th{text-align:left;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-faint);font-weight:600;padding:9px 14px;border-bottom:1px solid var(--border);white-space:nowrap}
+  thead th.sortable{cursor:pointer}
+  thead th.sortable:hover{color:var(--accent-ink)}
+  thead th .ar{opacity:0;font-size:9px}
+  thead th.act .ar{opacity:1}
+  th.c-n,td.c-n{width:56px;text-align:right}
+  th.c-ty,td.c-ty{width:118px}
+  th.c-st,td.c-st{width:104px}
+  th.c-og,td.c-og,th.c-up,td.c-up{width:108px}
+  th.c-so,td.c-so{width:150px}
+  tbody tr.row{border-bottom:1px solid var(--border);cursor:pointer}
+  tbody tr.row:last-child{border-bottom:0}
+  tbody tr.row:hover{background:var(--raised)}
+  tbody tr.row.closed .ttl{color:var(--text-dim)}
+  tbody td{padding:9px 14px;vertical-align:top}
+  td.c-n{font-family:var(--mono);font-size:12.5px}
+  .name{display:flex;align-items:flex-start;gap:8px}
+  .name .exp{color:var(--text-faint);font-size:10px;margin-top:4px;transition:transform .15s;flex:none}
+  tr.open .name .exp{transform:rotate(90deg);color:var(--accent)}
+  td.c-og,td.c-up{font-family:var(--mono);font-size:12px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+  td.c-so{font-family:var(--mono);font-size:12px}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:2px 9px 2px 7px;border-radius:999px;background:color-mix(in srgb,var(--sc) 13%,transparent);color:var(--text);border:1px solid color-mix(in srgb,var(--sc) 34%,transparent);white-space:nowrap}
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--sc);flex:none}
+  .tag{display:inline-block;font-size:12px;padding:1px 8px;border-radius:6px;background:var(--surface-2);color:var(--text);white-space:nowrap}
+  .none{color:var(--text-faint);font-style:italic}
+  tr.detail td{padding:0 14px}
+  tr.detail .box{margin:0 0 12px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;font-size:13px;color:var(--text-dim);line-height:1.6}
+  tr.detail .box dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}
+  tr.detail .box dt{font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-faint);padding-top:2px}
+  tr.detail .box dd{margin:0;color:var(--text)}
+  tr.detail .box ul{margin:0;padding-left:18px}
+  a{color:var(--accent-ink)}
+  .src td{padding:8px 14px;border-bottom:1px solid var(--border);vertical-align:top}
+  .src tr:last-child td{border-bottom:0}
+  .src td.k{font-family:var(--mono);font-size:12.5px;width:110px}
+  .src .p{font-family:var(--mono);font-size:11.5px;color:var(--text-dim);word-break:break-all}
+  .warn{margin-top:8px;padding:8px 11px;border-radius:8px;border:1px solid color-mix(in srgb,#f59e0b 45%,var(--border));background:color-mix(in srgb,#f59e0b 10%,var(--surface));color:var(--text);font-size:12.5px}
+  #dangling .warn{margin:14px 0 0}
+  .empty{padding:26px 16px;text-align:center;color:var(--text-faint);font-size:13px}
+  footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--border);color:var(--text-faint);font-size:12px;line-height:1.6}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+  @media (max-width:720px){th.c-og,td.c-og,th.c-up,td.c-up,th.c-so,td.c-so{display:none}.wrap{padding:18px 14px 52px}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="head">
+    <h1>register <span class="path">· __TITLE__</span></h1>
+    <span class="gen">generated by · register render</span>
+    <p class="sub">A view of <code>DEVIATIONS.md</code>: one row per entry, built from its header line. Filter with the chips (any chip in a row; every row of chips at once), search by number, title or citing file, click an entry for its sources and the files that cite it. The reasoning lives in the Markdown; this page is read-only and regenerated by <code>register render</code>.</p>
+  </header>
+
+  <div id="chips"></div>
+  <div class="toolbar">
+    <label class="search">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="q" type="search" placeholder="Filter by number, title or citing file…" autocomplete="off" aria-label="Filter entries">
+    </label>
+    <div class="sortbox"><span>Sort</span>
+      <select id="sortKey" aria-label="Sort column">
+        <option value="n">#</option><option value="title">Deviation</option><option value="type">Type</option>
+        <option value="status">Status</option><option value="original">Original</option><option value="updated">Updated</option>
+      </select>
+      <button class="btn" id="dir" aria-label="Sort direction">↑ asc</button>
+    </div>
+    <button class="btn" id="expandAll">Expand all</button>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div id="dangling"></div>
+  <section class="section"><div class="sec-head"><h2>Entries</h2><span class="sec-n" id="secn"></span></div>
+    <table><thead id="thead"></thead><tbody id="rows"></tbody></table></section>
+  <section class="section"><div class="sec-head"><h2>Sources</h2><span class="sec-n" id="srcn"></span></div>
+    <table class="src"><tbody id="srcs"></tbody></table></section>
+  <footer id="foot"></footer>
+</div>
+
+<script>
+//__DATA__//
+</script>
+
+<script>
+  const STCOLOR={active:"#3b82f6",moot:"#f59e0b",closed:"#6b7280"};
+  const STORDER=["active","moot","closed"];
+  const PALETTE=["#8b5cf6","#06b6d4","#f97316","#22c55e","#ec4899","#eab308","#14b8a6","#a855f7","#ef4444","#64748b"];
+  const TYCOLOR={};TYPES.forEach((t,i)=>TYCOLOR[t.type]=PALETTE[i%PALETTE.length]);
+  const SRC={};SOURCES.forEach(s=>SRC[s.key]=s);
+  const NONE="none";
+  const state={q:"",status:new Set(),type:new Set(),key:new Set(),sortKey:"n",dir:1,expanded:new Set()};
+  const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  // The heading's own inline Markdown, enough to read: code spans, bold, strike-through.
+  function md(s){return String(s).split("`").map((p,i)=>i%2?`<code>${esc(p)}</code>`:esc(p).replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>").replace(/~~([^~]+)~~/g,"<s>$1</s>")).join("")}
+  const plain=s=>String(s).replace(/[`*~]/g,"");
+  const href=p=>p.split("/").map(encodeURIComponent).join("/");
+  const keysOf=e=>e.sources.length?e.sources.map(s=>s.key):[NONE];
+  const lastUpd=e=>e.updated.length?e.updated[e.updated.length-1]:"";
+  const so=s=>{const i=STORDER.indexOf(s);return i<0?STORDER.length:i};
+  const citesOf=e=>CITES[String(e.n)]||[];
+  // Citations are as of the last render, from the live files (spec § 2, Q3).
+  function citedBy(e){
+    if(!CITE_SCOPE)return `<span class="none">not collected: the page was rendered outside a git work tree</span>`;
+    const c=citesOf(e);if(!c.length)return `<span class="none">not cited in the ${esc(CITE_SCOPE)}</span>`;
+    const by={},order=[];c.forEach(([f,l])=>{if(!(f in by)){by[f]=[];order.push(f)}by[f].push(l)});
+    return `<ul>${order.map(f=>`<li><code>${esc(f)}</code> ${by[f].length>1?'lines':'line'} ${by[f].join(", ")}</li>`).join("")}</ul>`
+      +(e.status==="closed"?`<div class="warn">Entry ${e.n} is closed: check whether these citations still apply.</div>`:"")}
+  const tyo=t=>{const i=TYPES.findIndex(x=>x.type===t);return i<0?TYPES.length:i};
+
+  function match(e){
+    if(state.status.size&&!state.status.has(e.status))return false;
+    if(state.type.size&&!state.type.has(e.type))return false;
+    if(state.key.size&&!keysOf(e).some(k=>state.key.has(k)))return false;
+    if(state.q){const q=state.q.toLowerCase();if(!(String(e.n)===q.replace(/^#/,"")||plain(e.title).toLowerCase().includes(q)||citesOf(e).some(c=>c[0].toLowerCase().includes(q))))return false}
+    return true}
+  function cmp(a,b){let r=0;const k=state.sortKey;
+    if(k==="n")r=a.n-b.n;else if(k==="title")r=plain(a.title).toLowerCase().localeCompare(plain(b.title).toLowerCase());
+    else if(k==="type")r=tyo(a.type)-tyo(b.type);else if(k==="status")r=so(a.status)-so(b.status);
+    else if(k==="original")r=a.original<b.original?-1:a.original>b.original?1:0;
+    else if(k==="updated"){const x=lastUpd(a),y=lastUpd(b);r=x<y?-1:x>y?1:0}
+    return (r||a.n-b.n)*state.dir}
+
+  function chipRow(label,group,items){
+    const counts={};ENTRIES.forEach(e=>{(group==="key"?keysOf(e):[e[group]]).forEach(v=>counts[v]=(counts[v]||0)+1)});
+    const set=state[group];
+    return `<div class="chips"><span class="lbl">${esc(label)}</span>`+items.map(([v,color,shown])=>{const on=set.has(v);
+      return `<button class="chip ${on?'on':''}" style="--sc:${color}" data-g="${group}" data-v="${esc(v)}" aria-pressed="${on}"><span class="dot"></span>${esc(shown)} <span class="n">${counts[v]||0}</span></button>`}).join("")
+      +(set.size?`<button class="btn clr" data-g="${group}">clear</button>`:"")+`</div>`}
+  function renderChips(){
+    // Values the tables do not declare (hand-edited, not yet re-checked) still get chips.
+    const st=STORDER.concat([...new Set(ENTRIES.map(e=>e.status))].filter(s=>!STORDER.includes(s)).sort());
+    const ty=TYPES.map(t=>t.type).concat([...new Set(ENTRIES.map(e=>e.type))].filter(t=>!(t in TYCOLOR)).sort());
+    const used=new Set(ENTRIES.flatMap(keysOf));
+    const ks=SOURCES.map(s=>s.key).concat([...used].filter(k=>k!==NONE&&!(k in SRC)).sort()).concat(used.has(NONE)?[NONE]:[]);
+    const el=document.getElementById("chips");
+    el.innerHTML=chipRow("Status","status",st.map(s=>[s,STCOLOR[s]||"#888",s]))
+      +chipRow("Type","type",ty.map(t=>[t,TYCOLOR[t]||"#888",t]))
+      +chipRow("Source","key",ks.map(k=>[k,k===NONE?"#8a94a6":"var(--accent)",k]));
+    el.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{const s=state[c.dataset.g],v=c.dataset.v;s.has(v)?s.delete(v):s.add(v);render()});
+    el.querySelectorAll(".clr").forEach(b=>b.onclick=()=>{state[b.dataset.g].clear();render()});
+  }
+  function detail(e){
+    const ty=TYPES.find(t=>t.type===e.type);
+    const srcs=e.sources.length?`<ul>${e.sources.map(s=>{const d=SRC[s.key];
+      return `<li>${d?`<a href="${esc(href(d.path))}">${esc(s.key)}</a> — ${esc(d.doc)}${d.version?` ${esc(d.version)}`:''}${d.date?` (${esc(d.date)})`:''}`:esc(s.key)}: ${esc(s.loc)}</li>`}).join("")}</ul>`
+      :`<span class="none">none — no vendor document addresses the point</span>`;
+    return `<tr class="detail"><td colspan="7"><div class="box"><dl>
+      <dt>Type</dt><dd>${esc(e.type)}${ty&&ty.meaning?` — ${esc(ty.meaning)}`:''}</dd>
+      <dt>Dates</dt><dd>original ${esc(e.original)}${e.updated.length?`; updated ${e.updated.map(esc).join(", ")}`:''}</dd>
+      <dt>Sources</dt><dd>${srcs}</dd>
+      <dt>Cited by</dt><dd>${citedBy(e)}</dd>
+      <dt>Cite as</dt><dd><code>register ${e.n}</code></dd></dl></div></td></tr>`}
+  function renderRows(){
+    const cols=[["n","#","c-n"],["title","Deviation","c-t"],["type","Type","c-ty"],["status","Status","c-st"],["original","Original","c-og"],["updated","Updated","c-up"],["","Source","c-so"]];
+    document.getElementById("thead").innerHTML="<tr>"+cols.map(([k,l,c])=>{const act=k&&state.sortKey===k;
+      return `<th class="${c} ${k?'sortable':''} ${act?'act':''}" ${k?`data-k="${k}"`:''}>${l}<span class="ar">${act?(state.dir>0?'▲':'▼'):''}</span></th>`}).join("")+"</tr>";
+    const rows=ENTRIES.filter(match).sort(cmp);
+    const tb=document.getElementById("rows");
+    tb.innerHTML=rows.length?rows.map(e=>{const open=state.expanded.has(e.n);
+      return `<tr class="row ${open?'open':''} ${e.status==='closed'?'closed':''}" data-n="${e.n}" tabindex="0" role="button" aria-expanded="${open}">
+        <td class="c-n">${e.n}</td><td><div class="name"><span class="exp">▶</span><span class="ttl">${md(e.title)}</span></div></td>
+        <td class="c-ty"><span class="tag" style="box-shadow:inset 3px 0 0 ${TYCOLOR[e.type]||'#888'}">${esc(e.type)}</span></td>
+        <td class="c-st"><span class="pill" style="--sc:${STCOLOR[e.status]||'#888'}"><span class="dot"></span>${esc(e.status)}</span></td>
+        <td class="c-og">${esc(e.original)}</td><td class="c-up">${e.updated.length?esc(lastUpd(e))+(e.updated.length>1?` <span class="none">+${e.updated.length-1}</span>`:''):'—'}</td>
+        <td class="c-so">${e.sources.length?[...new Set(e.sources.map(s=>s.key))].map(esc).join(" "):'<span class="none">none</span>'}</td></tr>${open?detail(e):''}`}).join("")
+      :`<tr><td colspan="7"><div class="empty">${ENTRIES.length?'No entries match the current filter.':'No entries recorded yet.'}</div></td></tr>`;
+    document.getElementById("count").textContent=`${rows.length} of ${ENTRIES.length} shown`;
+    document.getElementById("secn").textContent=rows.length!==ENTRIES.length?`${rows.length} / ${ENTRIES.length}`:`${ENTRIES.length}`;
+    document.querySelectorAll("thead th.sortable").forEach(t=>t.onclick=()=>{const k=t.dataset.k;if(state.sortKey===k)state.dir*=-1;else{state.sortKey=k;state.dir=1}syncSort();renderRows()});
+    tb.querySelectorAll("tr.row").forEach(tr=>{const n=+tr.dataset.n;const t=()=>{state.expanded.has(n)?state.expanded.delete(n):state.expanded.add(n);renderRows()};tr.onclick=t;tr.onkeydown=ev=>{if(ev.key==="Enter"||ev.key===" "){ev.preventDefault();t()}}});
+  }
+  function renderSources(){
+    document.getElementById("srcn").textContent=SOURCES.length;
+    document.getElementById("srcs").innerHTML=SOURCES.length?SOURCES.map(s=>`<tr><td class="k"><a href="${esc(href(s.path))}">${esc(s.key)}</a></td><td>${esc(s.doc)}${s.version?` <span class="none">${esc(s.version)}</span>`:''}${s.date?` <span class="none">${esc(s.date)}</span>`:''}<div class="p">${esc(s.path)}</div></td></tr>`).join("")
+      :`<tr><td><div class="empty">No sources declared yet.</div></td></tr>`}
+  function syncSort(){document.getElementById("sortKey").value=state.sortKey;document.getElementById("dir").textContent=state.dir>0?"↑ asc":"↓ desc"}
+  function render(){renderChips();renderRows()}
+  document.getElementById("q").addEventListener("input",e=>{state.q=e.target.value.trim();renderRows()});
+  document.getElementById("sortKey").addEventListener("change",e=>{state.sortKey=e.target.value;state.dir=1;syncSort();renderRows()});
+  document.getElementById("dir").addEventListener("click",()=>{state.dir*=-1;syncSort();renderRows()});
+  // Judge "all open?" against the visible rows only (track's B83).
+  document.getElementById("expandAll").addEventListener("click",()=>{const vis=ENTRIES.filter(match);const all=vis.length>0&&vis.every(e=>state.expanded.has(e.n));
+    vis.forEach(e=>all?state.expanded.delete(e.n):state.expanded.add(e.n));document.getElementById("expandAll").textContent=all?"Expand all":"Collapse all";renderRows()});
+  if(DANGLING.length)document.getElementById("dangling").innerHTML=`<div class="warn"><strong>${DANGLING.length} citation${DANGLING.length>1?'s name entries':' names an entry'} that ${DANGLING.length>1?'do':'does'} not exist:</strong> ${DANGLING.map(([f,l,n])=>`<code>${esc(f)}:${l}</code> (register ${esc(n)})`).join(", ")}. Run <code>register map</code>.</div>`;
+  const nc=Object.values(CITES).reduce((a,c)=>a+c.length,0);
+  document.getElementById("foot").innerHTML=`<strong>DEVIATIONS.html</strong> — generated from <code>DEVIATIONS.md</code> by <code>register render</code>. ${ENTRIES.length} entries, ${TYPES.length} types, ${SOURCES.length} sources; ${CITE_SCOPE?`${nc} citations in the ${esc(CITE_SCOPE)}, as of the last render`:"citations not collected"}. Read-only; edit the Markdown, then re-render.`;
+  syncSort();renderSources();render();
+</script>
+</body>
+</html>
+HTML
+  rm -f "$datafile"
+}
+
+# ── Citations ─────────────────────────────────────────────────────────────────────────
+# A citation is `register N` in one of the repo's tracked files, read from the worktree.
+# The default scope is the files that describe the build as it is now (spec § 2, Q3): it
+# leaves out the register, the generated pages, docs/reference/, the dated records in
+# docs/AI/ and z-deprecated/, which keep citing entries that have since closed. --all
+# drops those exclusions for one run.
+repo_root() {  # → ROOT, REGREL, HTMLREL; returns 1 when the register is not in a git work tree
+  local d r
+  ROOT="$(git -C "$(dirname -- "$FILE")" rev-parse --show-toplevel 2>/dev/null)" && [ -n "$ROOT" ] || return 1
+  d="$(cd "$(dirname -- "$FILE")" && pwd -P)"; r="$(cd "$ROOT" && pwd -P)"
+  case "$d/" in "$r/"*) ;; *) return 1 ;; esac
+  d="${d#"$r"}"; d="${d#/}"; d="${d:+$d/}"
+  REGREL="$d$(basename -- "$FILE")"; HTMLREL="${d}DEVIATIONS.html"
+}
+
+# The scan, over the files git grep names (binary files skipped). Emits records:
+#   C file line N       a citation (once per number per line)
+#   U file line text    a "DEVIATIONS applied" item that names no register entry
+# `register N` matches in any case, not inside a longer word (preregister 3), and not
+# when N runs on into a date or a version (register 2026-09-30, register 1.36). A
+# "DEVIATIONS applied" block opens on a comment line naming it and runs to an empty
+# comment line or the first non-comment line; its items are its bullets (with their
+# indented continuation lines), or the text after its colon when it has no bullets.
+read -r -d '' MAPPER <<'AWK' || true
+function trim(x){ gsub(/^[ \t]+|[ \t]+$/,"",x); return x }
+function flush(  low){
+  if(cur!=""){ low=tolower(cur)
+    if(low !~ /(^|[^a-z0-9_])register[ \t]+[0-9]/) print "U" "\037" cf "\037" curl "\037" (length(cur)>140 ? substr(cur,1,139) "…" : cur) }
+  cur=""
+}
+function indent(s){ match(s,/^[ \t]*/); return RLENGTH }
+FNR==1{ if(inblk) flush(); inblk=0; cf=FILENAME; sub(/^\.\//,"",cf) }
+{ line=$0; sub(/\r$/,"",line); low=tolower(line)
+  split("",SEEN); s=low; off=0
+  while(match(s,/register[ \t]+[0-9]+/)){
+    st=RSTART; ln=RLENGTH; abs=off+st
+    pre=(abs>1)?substr(low,abs-1,1):""
+    num=substr(s,st,ln); sub(/^register[ \t]+/,"",num)
+    nx=substr(s,st+ln,2)
+    if(pre !~ /[a-z0-9_]/ && nx !~ /^[.-][0-9]/){
+      sub(/^0+/,"",num); if(num=="") num="0"
+      if(!(num in SEEN)){ SEEN[num]=1; print "C" "\037" cf "\037" FNR "\037" num }
+    }
+    off=abs+ln-1; s=substr(s,st+ln)
+  }
+  if(inblk){
+    m=line; sub(/^[ \t]+/,"",m)
+    if(index(m,mk)!=1){ flush(); inblk=0 }
+    else {
+      body=substr(m,length(mk)+1)
+      if(body ~ /^[ \t]*$/){ flush(); inblk=0 }
+      # A bullet at the first bullet's indent (or less) opens an item; deeper, a line that
+      # merely starts with - * + is a continuation ("#     + actions-api warms)").
+      else if(body ~ /^[ \t]*[-*+][ \t]/ && (!bul || indent(body)<=bind)){ flush(); if(!bul) bind=indent(body); cur=body; sub(/^[ \t]*[-*+][ \t]+/,"",cur); cur=trim(cur); curl=FNR; bul=1 }
+      else if(bul && indent(body)<=hind){ flush(); inblk=0 }   # back at the header's level: a new paragraph
+      else if(cur!="") cur=cur " " trim(body)
+    }
+  }
+  if(!inblk && match(line,/^[ \t]*[^ \tA-Za-z0-9]+[ \t]*DEVIATIONS applied/)){
+    m=line; sub(/^[ \t]+/,"",m); match(m,/^[^ \tA-Za-z0-9]+/); mk=substr(m,1,RLENGTH)
+    r=substr(m,RLENGTH+1); hind=indent(r)
+    sub(/^[ \t]*DEVIATIONS applied/,"",r); sub(/^[ \t]*\([^)]*\)/,"",r); sub(/^[ \t]*:/,"",r); r=trim(r)
+    inblk=1; bul=0; cur=""
+    if(r!="" && tolower(r) !~ /^none([^a-z]|$)/){ cur=r; curl=FNR }
+  }
+}
+END{ if(inblk) flush() }
+AWK
+
+collect() {  # $1 = 1 for --all; $2 = one repo-relative file to scan alone ("" for the scope) → CREC
+  local all=$1 only=$2 lst rc=0 f
+  local spec=() files=() args=()
+  CREC=""
+  if [ -n "$only" ]; then spec=(-- "$only")
+  else
+    spec=(-- .)
+    [ "$all" = 1 ] || spec+=(":(exclude)$REGREL" ":(exclude)$HTMLREL" ':(exclude,glob)**/tracker.html'
+                             ':(exclude)docs/reference' ':(exclude)docs/AI' ':(exclude)z-deprecated')
+  fi
+  lst="$(mktemp)" || err "cannot create a temp file"; TMPF+=("$lst")
+  git -C "$ROOT" grep -l -z -I -i -E -e '(^|[^[:alnum:]_])register[[:space:]]+[0-9]' -e 'DEVIATIONS applied' "${spec[@]}" > "$lst" 2>/dev/null || rc=$?
+  [ "$rc" -le 1 ] || err "git grep failed in $ROOT (exit $rc)"
+  mapfile -d '' -t files < "$lst"
+  [ "${#files[@]}" -gt 0 ] || return 0
+  # './' keeps a file named like 'a=b' from being read as an awk variable assignment.
+  for f in "${files[@]}"; do args+=("./$f"); done
+  CREC="$(cd "$ROOT" && LC_ALL=C awk "$MAPPER" "${args[@]}")" || err "the citation scan failed in $ROOT"
+}
+
+# The page's citation block, from CREC: citations of existing entries per entry, the rest
+# as DANGLING. It sits between two marker lines that `check` leaves out of its comparison:
+# a commit that only moves a citation must not make the page STALE (decided 2026-10-01).
+cites_js() {  # $1 = scope label ("" when citations were not collected)
+  local r kind f l n t _ out="" dang=""
+  declare -A CI=() HAS=()
+  for r in "${ENTRIES_R[@]}"; do IFS=$'\037' read -r _ n _ <<<"$r"; HAS[$n]=1; done
+  while IFS=$'\037' read -r kind f l n; do
+    [ "$kind" = C ] || continue
+    if [ -n "${HAS[$n]:-}" ]; then CI[$n]+="[$(jsstr "$f"),$l],"
+    else dang+="[$(jsstr "$f"),$l,$(jsstr "$n")],"; fi
+  done <<<"$CREC"
+  out+="// cites:begin — citations, as of the last render; register check does not compare these lines"$'\n'
+  out+="const CITE_SCOPE = $(jsstr "$1");"$'\n'"const CITES = {"$'\n'
+  for r in "${ENTRIES_R[@]}"; do
+    IFS=$'\037' read -r _ n _ <<<"$r"
+    [ -n "${CI[$n]:-}" ] && out+="  \"$n\":[${CI[$n]}],"$'\n'
+  done
+  out+="};"$'\n'"const DANGLING = [$dang];"$'\n'"// cites:end"
+  printf '%s' "$out"
+}
+# The page minus its citation block — what `check` compares.
+strip_cites() { awk '/^\/\/ cites:begin/{s=1} !s{print} /^\/\/ cites:end$/{s=0}' "$1"; }
+
+# The map report, from CREC and the entries.
+read -r -d '' REPORT <<'AWK' || true
+BEGIN{ FS="\037"; mode=ENVIRON["MODE"]; want=ENVIRON["ENTRY"] }
+FILENAME==ENVIRON["ENTF"]{ st[$1]=$2; ti[$1]=$3; ord[++ne]=$1; next }
+$1=="C"{ f=$2; l=$3; n=$4; if(want!="" && n!=want) next; nc++
+  if(!(n in st)){ P[++np]="error    " f ":" l ": register " n " — no such entry"; PN[np]=n; nerr++ }
+  else if(st[n]=="closed"){ P[++np]="warning  " f ":" l ": register " n " — entry " n " is closed"; PN[np]=n; nw++ }
+  if(lf[n]!=f){ by[n]=by[n] "\n       " f ": " l; lf[n]=f } else by[n]=by[n] ", " l
+  if(!((f,n) in fe)){ fe[f,n]=1; if(!(f in fk)){ fo[++nf]=f; fk[f]=0 } FN[f, ++fk[f]]=n+0 }
+  cited[n]=1; next }
+$1=="U"{ if(want=="") T[++nt]=$2 ":" $3 ": " $4; next }
+END{
+  for(i=1;i<=ne;i++) if(ord[i] in cited) ncd++
+  if(mode=="entry"){
+    if(want in st) printf "%3s  %s%s\n", want, ti[want], (st[want]=="active"?"":" (" st[want] ")")
+    else printf "entry %s: no such entry\n", want
+    printf "%s\n", (want in cited) ? substr(by[want],2) : "       not cited"
+    for(i=1;i<=np;i++) if(PN[i]==want) print "  " P[i]
+    exit (mode=="check" && nerr>0)
+  }
+  if(mode!="check"){
+    printf "register map — %s: %d entries; %d citations of %d entries in %d files\n", ENVIRON["SCOPE"], ne, nc, ncd, nf
+    print ""; print "Entries" (ncd ? "" : ": none cited")
+    for(i=1;i<=ne;i++){ n=ord[i]; if(!(n in cited)) continue
+      printf "%3s  %s%s%s\n", n, ti[n], (st[n]=="active"?"":" (" st[n] ")"), by[n] }
+    if(mode!="file"){
+      u=""; for(i=1;i<=ne;i++) if(!(ord[i] in cited)) u=u (u==""?"":", ") ord[i]
+      print ""; print "Not cited (listed, not a problem): " (u==""?"none":u)
+      print ""; print "Files" (nf ? "" : ": none")
+      for(i=1;i<=nf;i++){ f=fo[i]; k=fk[f]; for(a=1;a<=k;a++) L2[a]=FN[f,a]
+        for(a=2;a<=k;a++){ v=L2[a]; for(b=a-1;b>=1 && L2[b]>v;b--) L2[b+1]=L2[b]; L2[b+1]=v }   # insertion sort: POSIX awk has no asort
+        s=""; for(a=1;a<=k;a++) s=s (a>1?", ":"") L2[a]; print "  " f ": " s }
+    }
+    if(nt){ print ""; print "To triage: \"DEVIATIONS applied\" items that name no register entry (no number is guessed)"
+      for(i=1;i<=nt;i++) print "  " T[i] }
+  }
+  if(np){ print ""; print "Problems"; for(i=1;i<=np;i++) print "  " P[i] }
+  print ""; printf "%d error(s), %d warning(s)%s\n", nerr, nw, (mode=="check" ? "" : sprintf(", %d item(s) to triage", nt))
+  exit (mode=="check" && nerr>0)
+}
+AWK
+
+cmd_map() {
+  local all=0 entry="" file="" check=0 only="" abs mode scope rc=0 entf r n t st _
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all)   all=1; shift ;;
+      --check) check=1; shift ;;
+      --entry) [ $# -ge 2 ] || err "--entry requires a number"; entry="$2"; shift 2
+               case "$entry" in ''|*[!0-9]*) err "--entry takes a whole number, not '$entry'" ;; esac
+               entry="${entry#"${entry%%[!0]*}"}"; entry="${entry:-0}" ;;
+      --file)  [ $# -ge 2 ] || err "--file requires a path"; file="$2"; shift 2 ;;
+      *) err "usage: register map [--entry N | --file PATH] [--all] [--check]" ;;
+    esac
+  done
+  [ -z "$entry" ] || [ -z "$file" ] || err "--entry and --file narrow the listing two different ways; pass one"
+  parse
+  if [ "$NB" -eq 0 ]; then
+    printf 'register: %s has no <!-- register:begin --> marker — not yet migrated; nothing to map\n' "$FILE"; return 0
+  fi
+  if [ "${#PROBS[@]}" -gt 0 ]; then print_probs; err "map needs a valid register (run: register check)"; fi
+  repo_root || err "map reads the repo's tracked files, and $FILE is not inside a git work tree"
+  if [ -n "$file" ]; then
+    # The named file is scanned whatever the scope: you asked for it by name.
+    if [ -e "$file" ]; then abs="$(cd "$(dirname -- "$file")" && pwd -P)/$(basename -- "$file")"; else abs="$ROOT/$file"; fi
+    only="$(git -C "$ROOT" ls-files --full-name --error-unmatch -- "$abs" 2>/dev/null)" || err "$file is not a file git tracks in $ROOT"
+  fi
+  collect "$all" "$only"
+  entf="$(mktemp)" || err "cannot create a temp file"; TMPF+=("$entf")
+  for r in "${ENTRIES_R[@]}"; do IFS=$'\037' read -r _ n t _ st _ <<<"$r"; printf '%s\037%s\037%s\n' "$n" "$st" "$t"; done > "$entf"
+  if [ "$check" -eq 1 ]; then mode="check"; elif [ -n "$entry" ]; then mode="entry"; elif [ -n "$file" ]; then mode="file"; else mode="list"; fi
+  if [ -n "$only" ]; then scope="$only"; elif [ "$all" -eq 1 ]; then scope="every tracked file (--all)"; else scope="live files (--all adds the register, the generated pages, docs/reference/, docs/AI/ and z-deprecated/)"; fi
+  printf '%s' "$CREC${CREC:+$'\n'}" | MODE="$mode" ENTRY="$entry" ENTF="$entf" SCOPE="$scope" LC_ALL=C awk "$REPORT" "$entf" - || rc=$?
+  # The page's citations: a warning when they no longer match the live files. Only the
+  # default scope is what the page shows, so --all and --file skip this.
+  if [ "$all" -eq 0 ] && [ -z "$only" ] && [ -f "$HTML" ]; then
+    if [ "$(awk '/^\/\/ cites:begin/{s=1} s{print} /^\/\/ cites:end$/{s=0}' "$HTML")" != "$(cites_js "live files")" ]; then
+      printf 'warning: the citations in %s are out of date — run: register render\n' "$HTML"
+    fi
+  fi
+  return "$rc"
+}
+
+# ── render ────────────────────────────────────────────────────────────────────────────
+cmd_render() {
+  [ $# -eq 0 ] || err "usage: register render (it takes no options; 'register check' verifies without writing)"
+  take_lock
+  parse
+  [ "$NB" -gt 0 ] || err "$FILE has no '<!-- register:begin' marker: not yet migrated, so there is no summary block to render (add the types and sources tables, the header lines and the marker pair first)"
+  if [ "${#PROBS[@]}" -gt 0 ]; then print_probs; err "nothing written: render refuses a register that fails validation"; fi
+  [ -d "$HTML" ] && err "$HTML exists as a DIRECTORY — clear it, then re-render"
+  # The page's citations come from the live files at this moment; outside a git work tree
+  # there are none to read, and the page says so.
+  if repo_root; then collect 0 ""; CSCOPE="live files"; else CREC=""; CSCOPE=""; fi
+  local treg="$FILE.tmp.$$" thtml="$HTML.tmp.$$" ncites
+  TMPF+=("$treg" "$thtml" "$thtml.data")
+  generate "$treg" "$thtml" || err "cannot write next to $FILE (directory unwritable or disk full?)"
+  # An unchanged file is left untouched, so its mtime says when it last really changed.
+  local done=""
+  if cmp -s "$treg" "$FILE"; then rm -f "$treg"; else mv "$treg" "$FILE" || err "cannot replace $FILE (permissions?)"; done="the summary block"; fi
+  if [ -f "$HTML" ] && cmp -s "$thtml" "$HTML"; then rm -f "$thtml"; else mv "$thtml" "$HTML" || err "cannot replace $HTML (permissions?)"; done="${done:+$done and }DEVIATIONS.html"; fi
+  ncites="$(printf '%s\n' "$CREC" | grep -c '^C' || true)"
+  printf '%s  (%d entries, %s citations%s)\n' "${done:+rendered $done}" "${#ENTRIES_R[@]}" "$ncites" "${CSCOPE:+ in the $CSCOPE}" | sed 's/^  /up to date  /'
+  [ -n "$CSCOPE" ] || printf 'register: %s is not inside a git work tree, so the page lists no citations\n' "$FILE" >&2
+}
+
+# ── check ─────────────────────────────────────────────────────────────────────────────
+cmd_check() {
+  [ $# -eq 0 ] || err "usage: register check (it takes no options)"
+  parse
+  if [ "$NB" -eq 0 ]; then
+    printf 'register: %s has no <!-- register:begin --> marker — not yet migrated; nothing to check\n' "$FILE"
+    return 0
+  fi
+  if [ "${#PROBS[@]}" -gt 0 ]; then print_probs; return 1; fi
+  TMPD="$(mktemp -d)" || err "cannot create a temp directory"
+  CREC="" CSCOPE=""
+  generate "$TMPD/DEVIATIONS.md" "$TMPD/DEVIATIONS.html" || err "cannot render into $TMPD (disk full?)"
+  local stale=0
+  # The pre-commit hook greps the token STALE to tell staleness from invalid input — keep it.
+  if ! cmp -s "$TMPD/DEVIATIONS.md" "$FILE"; then printf 'register: the summary block in %s is STALE — run: register render\n' "$FILE" >&2; stale=1; fi
+  # The citation block is left out: it follows the live files, not the register.
+  if [ ! -f "$HTML" ] || ! cmp -s <(strip_cites "$TMPD/DEVIATIONS.html") <(strip_cites "$HTML"); then printf 'register: %s is STALE — run: register render\n' "$HTML" >&2; stale=1; fi
+  [ "$stale" -eq 0 ] || return 1
+  printf 'register: valid and up to date  (%d entries, %d types, %d sources)\n' "${#ENTRIES_R[@]}" "${#TYPES_R[@]}" "${#SOURCES_R[@]}"
+}
+
+# Requested help goes to stdout at exit 0; usage on error to stderr at exit 1 (B52).
+usage() {
+  cat <<'EOF'
+register — checks and renders the deviations register (docs/official/DEVIATIONS.md)
+  register check     # validate; exit 1 on problems, or with STALE when a render is due
+  register render    # regenerate the summary block between the markers + DEVIATIONS.html
+  register map [--entry N | --file PATH] [--all] [--check]
+                     # where `register N` is cited (live files; --all for every tracked
+                     # file); --check exits 1 on a citation of a missing entry
+  (set REGISTER_FILE to work on another register; REGISTER_BASE resolves its Source paths elsewhere)
+EOF
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────────────
+[ $# -ge 1 ] || { usage >&2; exit 1; }
+sub="$1"; shift
+case "$sub" in
+  check)  resolve_file; cmd_check "$@" ;;
+  render) resolve_file; cmd_render "$@" ;;
+  map)    resolve_file; cmd_map "$@" ;;
+  -h|--help|help) usage; exit 0 ;;
+  *) err "unknown command '$sub' (check | render | map)" ;;
+esac

@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+# sync — update a repo's shared machinery from the standard (see ../standard/STANDARD.md).
+#   sync [target-dir] [--check] [--force] [--downgrade]
+# Re-copies the canonical, non-authored files (settings.json, hooks, pre-commit, track,
+# REPO-STANDARD.md, and register in a vendor-derived repo) when they differ, shows a diff of each change, restores lost exec bits (worktree AND
+# committed index mode), repairs the .gitignore slot for the personal Claude files
+# (.claude/settings.local.json*, CLAUDE.local.md), refreshes the
+# generated tracker.html when the renderer itself changed, and refreshes
+# .repo-standard-version. Never touches authored content (README, docs, tracker.md).
+# Does NOT commit.
+#   --check     : report what would change and exit nonzero if out of date; change nothing.
+#   --force     : take the canonical settings.json even where the target customized it.
+#                 In the standard's OWN source tree: dogfood mode — propagate template/ to
+#                 the live copies; no version stamp is written (the source is no consumer).
+#   --downgrade : proceed although the target's stamp records a NEWER standard than this
+#                 checkout. Its own flag on purpose: overloading --force here would make a
+#                 deliberate rollback silently clobber a customized settings.json too.
+set -uo pipefail
+unset CDPATH   # an exported CDPATH would reroute the bare `cd` below to $CDPATH/<target> (B71)
+
+# Resolve $0 through symlinks (B44's class): invoked via a symlink, dirname gives the
+# LINK's directory and the template would come up empty.
+SELF="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)"
+TEMPLATE="$SELF/../template"
+VERSION="$(cat "$SELF/../VERSION" 2>/dev/null || echo '?')"
+errx(){ printf 'sync: %s\n' "$*" >&2; exit 2; }
+
+TARGET="" CHECK="" FORCE="" DOWNGRADE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check)     CHECK=1; shift ;;
+    --force)     FORCE=1; shift ;;
+    --downgrade) DOWNGRADE=1; shift ;;
+    -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
+    -*)          errx "unknown option '$1'" ;;
+    *)           if [ -z "$TARGET" ]; then TARGET="$1"; else errx "unexpected arg '$1'"; fi; shift ;;
+  esac
+done
+[ -n "$TARGET" ] || TARGET="."
+[ -d "$TEMPLATE" ] || errx "template not found at $TEMPLATE"
+# A checkout that cannot state its own version must not copy machinery anywhere: with
+# VERSION='?' the downgrade guard below cannot judge direction ('?' happens to sort
+# NEWER than every real version), and the stamp it would write is 'repo-standard ?' —
+# which the guard's version-shape gate then exempts forever.
+[ "$VERSION" != "?" ] || errx "cannot read VERSION at $SELF/../VERSION — this checkout is incomplete; refusing to sync from it"
+cd -- "$TARGET" 2>/dev/null || errx "no such directory: $TARGET"
+ROOT="$(pwd)"
+# Guard the template/ subtree itself: it holds bin/ but not standard/, so the source-repo
+# refusal below does not see it, and a stray 'sync template' would plant a stamp and a
+# .gitignore INSIDE the canonical template.
+if [ "$(basename "$ROOT")" = "template" ] && [ -f "$ROOT/../standard/STANDARD.md" ]; then
+  errx "$ROOT is the standard's template/ directory, not a consumer repo"
+fi
+
+if [ -t 1 ]; then G=$'\033[32m' Y=$'\033[33m' C=$'\033[36m' D=$'\033[2m' N=$'\033[0m'; else G= Y= C= D= N=; fi
+
+# Refuse to sync the standard's own source tree into itself — except as explicit
+# dogfooding (B42): --force here propagates template/ to the repo's live copies, the
+# step that was previously done by hand with no supported command. Dogfood mode writes
+# NO version stamp: a stray .repo-standard-version would mark the source tree as its
+# own consumer.
+DOGFOOD=""
+if [ -f standard/STANDARD.md ] && [ -d template/bin ]; then
+  if [ -z "$FORCE" ]; then
+    printf 'sync: %s is the standard'"'"'s source repo (holds template/); nothing to sync.\n' "$ROOT"
+    printf '      (to dogfood template/ into the live copies here: sync --force .)\n'
+    exit 0
+  fi
+  DOGFOOD=1
+fi
+
+IS_GIT=0; git rev-parse --is-inside-work-tree >/dev/null 2>&1 && IS_GIT=1
+
+# Read the stamp EARLY: a stale checkout of the standard must not roll a target's
+# machinery BACKWARDS (B43) — the copy loop below acts on any content difference, so an
+# old template would silently downgrade hooks the target received from a newer
+# standard, with the stamp following. Compare version ORDER, not string inequality;
+# --force stands for a deliberate rollback.
+cur_ver="none"; arch="unknown"
+if [ -f .repo-standard-version ]; then
+  # An existing-but-unreadable stamp FAILS CLOSED (B107): with awk dying, cur_ver=''
+  # slips the version-shape gate below, and the stamp slot would then overwrite the
+  # record it never read — B43's rollback plus a record loss, from a permissions hiccup.
+  [ -r .repo-standard-version ] || errx "target's .repo-standard-version exists but cannot be read (permissions?) — fix that first; syncing blind could roll the target backwards"
+  cur_ver="$(awk 'NR==1{print $2}' .repo-standard-version)"
+  # Line 1 is the stamp of record — the same line init and verify read. A line naming
+  # BOTH archetypes is kept as EVIDENCE (B116), never first-match-resolved to one: the
+  # stamp refresh carries the ambiguity forward for verify to warn on and init to fix.
+  case "$(head -n 1 .repo-standard-version 2>/dev/null)" in
+    *"(vendor-derived)"*"(authored)"*|*"(authored)"*"(vendor-derived)"*) arch=both ;;
+    *"(vendor-derived)"*) arch=vendor-derived ;;
+    *"(authored)"*)       arch=authored ;;
+  esac
+fi
+# Dogfood mode is exempt from the downgrade guard (B126): any stamp in the SOURCE tree
+# is a stray artifact whatever its version, and erroring "pull the latest standard"
+# here pre-empts the dedicated stray-stamp diagnosis below that names the real problem.
+case "$cur_ver" in
+  [0-9]*.[0-9]*)
+    if [ "$cur_ver" != "$VERSION" ] && [ -z "$DOWNGRADE" ] && [ -z "$DOGFOOD" ]; then
+      newest="$(printf '%s\n%s\n' "$cur_ver" "$VERSION" | sort -V | tail -n1)"
+      if [ "$newest" = "$cur_ver" ]; then
+        errx "target is stamped repo-standard $cur_ver — NEWER than this checkout ($VERSION). Pull the latest standard; --downgrade for a deliberate rollback."
+      fi
+    fi ;;
+esac
+
+# The canonical, non-authored machinery. Authored content (README, docs, tracker.md) is NEVER synced.
+# bin/register (F17) is machinery for a vendor-derived repo only, judged from the stamp: an
+# authored, unknown or both-archetype stamp gets none (verify flags one in an authored repo).
+# Keep in lockstep with bin/init's MACHINERY.
+MACHINERY=".claude/settings.json
+.claude/hooks/stop-handoff-check.sh
+.claude/hooks/session-start-rollover-check.sh
+.githooks/pre-commit
+bin/track"
+[ "$arch" = vendor-derived ] && MACHINERY="$MACHINERY
+bin/register"
+# REPO-STANDARD.md, the notice, goes to every adopted repo — but not into the standard's own
+# source tree in dogfood mode: the source is not a consumer (the same reason it gets no
+# stamp, B42), and its notice is template/REPO-STANDARD.md itself.
+[ -n "$DOGFOOD" ] || MACHINERY="$MACHINERY
+REPO-STANDARD.md"
+is_exec(){ case "$1" in *.sh|.githooks/pre-commit|bin/track|bin/register) return 0 ;; *) return 1 ;; esac; }
+
+# Destination discipline (B59): a machinery write lands on NOTHING or on a REGULAR,
+# non-symlink file, and no path COMPONENT on the way there may be a symlink either —
+# tmp+mv inside a symlinked .claude/ still lands in a foreign tree. cp follows a
+# symlinked destination (destroying a file that may live OUTSIDE this repo, e.g. a
+# stow'd dotfile) and drops the copy INTO a directory one — both silently. So: check
+# the destination's type first, then write tmp+mv so the file is REPLACED, never
+# written through. This check runs BEFORE cmp/chmod ever open the destination: a FIFO
+# would hang cmp, and chmod would act through a link.
+dst_ok(){  # dst rel -> 0 writable; 1 refused (prints why)
+  local walk="$ROOT" p="$2"
+  while [ "${p#*/}" != "$p" ]; do
+    walk="$walk/${p%%/*}"; p="${p#*/}"
+    if [ -L "$walk" ]; then
+      printf '  %sBLCK%s  %s (parent directory %s is a symlink — sync will not write into a foreign tree)\n' "$Y" "$N" "$2" "${walk#"$ROOT"/}"
+      return 1
+    fi
+    if [ -e "$walk" ] && [ ! -d "$walk" ]; then
+      # A file where .claude/ should be: without this check the leaf stats as absent
+      # (ENOTDIR), sync prints ADD and "synced." at exit 0 while every write fails.
+      printf '  %sBLCK%s  %s (parent %s exists and is not a directory)\n' "$Y" "$N" "$2" "${walk#"$ROOT"/}"
+      return 1
+    fi
+  done
+  if [ -L "$1" ]; then
+    printf '  %sBLCK%s  %s (destination is a symlink — sync will not write through it; retarget or remove it yourself)\n' "$Y" "$N" "$2"
+    return 1
+  elif [ -e "$1" ] && [ ! -f "$1" ]; then
+    printf '  %sBLCK%s  %s (destination is not a regular file)\n' "$Y" "$N" "$2"
+    return 1
+  fi
+  return 0
+}
+write_file(){  # src dst rel -> 0 wrote; 1 failed (the cp/chmod/mv error prints on stderr)
+  mkdir -p "$(dirname "$2")" || return 1
+  local tmp="$2.tmp.$$"
+  cp "$1" "$tmp" || { rm -f "$tmp"; return 1; }
+  if is_exec "$3"; then chmod +x "$tmp" || { rm -f "$tmp"; return 1; }; fi
+  mv -f "$tmp" "$2" || { rm -f "$tmp"; return 1; }
+}
+# Does a settings.json wire the standard's two hooks? Segment-level, not a JSON parse
+# (jq is not assumed): each script name must appear BETWEEN its own event key and the
+# next occurrence of the OTHER event key (or EOF), whatever the whitespace — a
+# minified file passes, and a file with the two hooks SWAPPED across events no longer
+# false-KEPTs (B100). Accepted residues, constructed cases both: tokens stashed under
+# a foreign parent key (e.g. a "disabledHooks" block between the event keys) still
+# pass, and invalid JSON is judged as text. The failure direction stays
+# non-destructive — the file is kept, never written — and verify's wiring check WARNs.
+# Keep this awk in lockstep with verify's wiring check.
+wired_seg(){  # file event other-event script
+  LC_ALL=C awk -v ev="\"$2\"" -v oth="\"$3\"" -v hs="$4" '
+    { buf = buf $0 "\n" }
+    END { i = index(buf, ev); if (!i) exit 1
+          seg = substr(buf, i + length(ev))
+          j = index(seg, oth); if (j) seg = substr(seg, 1, j - 1)
+          exit index(seg, hs) ? 0 : 1 }' "$1"
+}
+wired(){ wired_seg "$1" Stop SessionStart stop-handoff-check.sh \
+         && wired_seg "$1" SessionStart Stop session-start-rollover-check.sh; }
+# Why the exec bit matters differs per file (D14): git runs the pre-commit and skips it
+# silently when non-exec; the Claude hooks and track are invoked by path by their own
+# runners, which git never touches.
+perm_why(){ case "$1" in .githooks/*) printf 'git silently ignores a non-exec hook' ;; .claude/*) printf 'Claude Code cannot run a non-exec hook script' ;; *) printf 'it is invoked by path' ;; esac; }
+
+printf '%ssync%s %s -> standard %s%s%s\n' "$D" "$N" "$ROOT" "$VERSION" "${CHECK:+  (check)}" "${DOGFOOD:+  (dogfood)}"
+updated=0 added=0 permfix=0 same=0 conflicts=0 blockedw=0 wfail=0 tmplmiss=0 track_updated=0 genpend=0 strays=0 reg_updated=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  src="$TEMPLATE/$rel"; dst="$ROOT/$rel"
+  if [ ! -f "$src" ]; then
+    # A missing template file means this checkout cannot deliver the standard it
+    # claims. It used to print and count NOTHING (B30), so "up to date" still followed.
+    printf '  %s???%s  %s (missing from template — this checkout of the standard is incomplete)\n' "$Y" "$N" "$rel"
+    tmplmiss=$((tmplmiss+1)); continue
+  fi
+  # Dogfooding keeps bin/track as a SYMLINK into template/ (F07: one copy, no drift):
+  # there that arrangement is canonical, not a blocked write.
+  if [ -n "$DOGFOOD" ] && [ "$rel" = "bin/track" ] && [ -L "$dst" ] \
+     && [ "$(readlink -f "$dst" 2>/dev/null)" = "$(readlink -f "$src" 2>/dev/null)" ]; then
+    same=$((same+1)); continue
+  fi
+  if ! dst_ok "$dst" "$rel"; then
+    # Refused destination (symlink anywhere on the path, or a non-regular file) —
+    # named above, counted, and never opened: no cmp, no chmod, no write. A symlinked
+    # destination BLCKs even when its content currently matches the canon: sync can
+    # never manage that file, so it fails early, not the day the template changes.
+    blockedw=$((blockedw+1))
+  elif [ ! -e "$dst" ]; then
+    printf '  %sADD %s  %s\n' "$G" "$N" "$rel"
+    if [ -n "$CHECK" ] || write_file "$src" "$dst" "$rel"; then
+      added=$((added+1)); [ "$rel" = "bin/track" ] && track_updated=1; [ "$rel" = "bin/register" ] && reg_updated=1
+    else
+      printf '  %sFAIL%s  %s (write failed — see the error above; nothing was installed)\n' "$Y" "$N" "$rel"
+      wfail=$((wfail+1))
+    fi
+  elif ! cmp -s "$src" "$dst" 2>/dev/null; then
+    # Differs (or is unreadable — cmp fails on that too). dst_ok already guarantees a
+    # regular, non-symlink file from here down.
+    if [ "$rel" = ".claude/settings.json" ] && [ -z "$FORCE" ]; then
+      # The one machinery file a target may legitimately customize (its own permissions,
+      # statusLine, extra hooks live here). The standard owns the hooks WIRING, not the
+      # file (B58 — the old behavior replaced it wholesale, destroying the target's
+      # keys with no backup). Never auto-overwrite: show the diff, let a human decide.
+      diff -u --label "current:   $rel" --label "canonical: $rel" "$dst" "$src" 2>/dev/null | sed 's/^/      /'
+      if wired "$dst"; then
+        printf '  %sKEPT%s  %s (differs, but wires the standard hooks (segment-level) — local customization preserved; --force takes canonical)\n' "$G" "$N" "$rel"
+        same=$((same+1))
+      else
+        printf '  %sCFLT%s  %s (differs and does NOT wire the standard hooks — merge the hooks block by hand, or --force to take canonical)\n' "$Y" "$N" "$rel"
+        conflicts=$((conflicts+1))
+      fi
+    else
+      printf '  %sUPD %s  %s\n' "$C" "$N" "$rel"
+      diff -u --label "current:   $rel" --label "canonical: $rel" "$dst" "$src" 2>/dev/null | sed 's/^/      /'
+      if [ -n "$CHECK" ] || write_file "$src" "$dst" "$rel"; then
+        updated=$((updated+1)); [ "$rel" = "bin/track" ] && track_updated=1; [ "$rel" = "bin/register" ] && reg_updated=1
+      else
+        printf '  %sFAIL%s  %s (write failed — see the error above; the old copy is still in place)\n' "$Y" "$N" "$rel"
+        wfail=$((wfail+1))
+      fi
+    fi
+  elif is_exec "$rel" && [ ! -x "$dst" ]; then
+    printf '  %sPERM%s  %s (restore +x — %s)\n' "$C" "$N" "$rel" "$(perm_why "$rel")"
+    if [ -n "$CHECK" ] || chmod +x "$dst"; then
+      permfix=$((permfix+1))
+    else
+      printf '  %sFAIL%s  %s (chmod failed — see the error above)\n' "$Y" "$N" "$rel"
+      wfail=$((wfail+1))
+    fi
+  else
+    same=$((same+1))
+  fi
+done <<< "$MACHINERY"
+
+# The exec bit that TRAVELS is the index's (B23): a machinery file committed 100644
+# ships disarmed to every clone even while the local copy is +x — the loop above and
+# verify both used to judge only the worktree, so sync said "up to date" and verify
+# said "guard active" while every clone got a dead hook. Repair the committed mode
+# where git tracks the file. This stages a mode change; you still gate the commit.
+if [ "$IS_GIT" = 1 ]; then
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    is_exec "$rel" || continue
+    mode="$(git ls-files -s -- "$rel" 2>/dev/null | awk '{print $1; exit}')"
+    [ "$mode" = "100644" ] || continue
+    printf '  %sXBIT%s  %s (committed mode 100644 — every clone receives it disarmed)\n' "$C" "$N" "$rel"
+    if [ -n "$CHECK" ] || git update-index --chmod=+x -- "$rel"; then
+      permfix=$((permfix+1))
+    else
+      printf '  %sFAIL%s  %s (git update-index --chmod=+x failed)\n' "$Y" "$N" "$rel"
+      wfail=$((wfail+1))
+    fi
+  done <<< "$MACHINERY"
+fi
+
+# --- gitignore slot (B41) ------------------------------------------------------------
+# init plants the repo-local ignore rule for .claude/settings.local.json; until now a
+# repo that lost it had NO travelling repair — verify warned and named no fix, and
+# sync's machinery list could never add it. sync now owns the slot with init's exact
+# contract: create from the skeleton when absent, append the ONE missing line when
+# present-but-uncovered, never rewrite rules you authored, refuse symlink/non-file
+# destinations. The slot is the GLOB `.claude/settings.local.json*` (B128): Claude Code
+# rewrites the file atomically through temp siblings named
+# settings.local.json.tmp.<pid>.<hex>, which the old exact-name rule left as untracked
+# noise — and a sibling that vanishes between `git add -A`'s enumeration and its stat
+# aborts the whole add at exit 128 ("unable to stat"). Covered means BOTH the file and
+# its siblings are ignored by a specific rule: the glob does both in one line; the
+# exact name plus a `.tmp.*` (or `.*`) sibling rule also counts, and the repair appends
+# the glob next to whatever half is present. Only the SPECIFIC rule counts as covered
+# (B25, matching init; B127 collapsed two contradictory tellings of this into one):
+# an optional leading '/' and
+# an optional '**/' prefix are accepted, nothing else — a bare '.claude/', or its
+# equal-effect '.claude/*', would untrack the standard's own hooks, so neither counts,
+# and appending the one specific line next to either is harmless.
+# No leading-whitespace tolerance (re-attack on B127): git does NOT strip leading
+# blanks from .gitignore patterns, so an indented rule ignores nothing and must not count as
+# covered. Trailing tolerance is git-exact (convergence N1): git strips trailing
+# SPACES only, after at most one CR of a CRLF ending — [[:space:]]*$ also admitted
+# tab/FF/VT, counting as covered a rule git does not honour — so the predicates
+# accept ` *\r?$` and nothing else, matching verify's blob_has_rule normalization.
+# The sibling half accepts the git-equivalent specific spellings `*`, `**`, `?*`,
+# `.*`, `.tmp.*` and their `**` forms (convergence N2) — all anchored to the full
+# settings.local.json name, so B25 specificity holds.
+# Judged by the LAST matching line per half, not grep presence (B132): git's parser is
+# last-match-wins, so `rule` followed by `!rule` un-ignores the file/siblings while the
+# old presence-only greps said covered forever and the travelling repair never fired
+# (verify's check-ignore probe already WARNed truthfully). A negation counts in exactly
+# the specific spellings that count as coverage, prefixed `!` — a broader `!.claude/*`
+# still slips this model, and verify stays the truthful judge — and the repair's EOF
+# append is the new last match, so one pass converges. Line 1 sheds a UTF-8 BOM first
+# (B133, blob_has_rule's M3 strip): git's parser skips it, so a BOM'd first-line rule
+# was honoured by git yet failed the line-anchored predicate — one redundant append,
+# then idle. LC_ALL=C keeps sprintf("%c") and the match byte-wise; no {n,m} intervals
+# (mawk lacks them). Keep this awk in lockstep with bin/init's copy.
+ign_covered(){
+  LC_ALL=C awk '
+    BEGIN{ bom=sprintf("%c%c%c",239,187,191)
+           f_re="^/?(\\*\\*/)?\\.claude/settings\\.local\\.json(\\*\\*?)?$"
+           s_re="^/?(\\*\\*/)?\\.claude/settings\\.local\\.json(\\*\\*?|\\?\\*\\*?|\\.\\*\\*?|\\.tmp\\.\\*\\*?)$" }
+    { if (NR==1 && index($0,bom)==1) $0=substr($0,4)
+      sub(/\r$/,"")
+      while ($0 ~ / $/ && $0 !~ /\\ $/) sub(/ $/,"")
+      neg=0; l=$0
+      if (substr(l,1,1)=="!"){ neg=1; l=substr(l,2) }
+      if (l ~ f_re) f = neg ? 0 : 1
+      if (l ~ s_re) s = neg ? 0 : 1 }
+    END{ exit (f && s) ? 0 : 1 }' "$1" 2>/dev/null
+}
+# The second personal file (D34, decided 2026-09-14): CLAUDE.local.md holds a developer's own
+# Claude directives. Claude Code loads it after CLAUDE.md in every session, and its docs say to
+# gitignore it — but nothing does that on its own. Same model as ign_covered (last match wins,
+# BOM, CR and trailing-space handling), covered only by the UNANCHORED rule, spelled
+# `CLAUDE.local.md` or `**/CLAUDE.local.md`: Claude Code also reads a CLAUDE.local.md in any
+# subdirectory, so a root-anchored `/CLAUDE.local.md` does not count and the repair appends the
+# unanchored line after it. As with ign_covered, a broader or anchored negation can still slip
+# this textual model; verify's check-ignore probes stay the truthful judge.
+# Keep this awk in lockstep with bin/init's copy.
+ign_local_covered(){
+  LC_ALL=C awk '
+    BEGIN{ bom=sprintf("%c%c%c",239,187,191); re="^(\\*\\*/)?CLAUDE\\.local\\.md$" }
+    { if (NR==1 && index($0,bom)==1) $0=substr($0,4)
+      sub(/\r$/,"")
+      while ($0 ~ / $/ && $0 !~ /\\ $/) sub(/ $/,"")
+      neg=0; l=$0
+      if (substr(l,1,1)=="!"){ neg=1; l=substr(l,2) }
+      if (l ~ re) c = neg ? 0 : 1 }
+    END{ exit c ? 0 : 1 }' "$1" 2>/dev/null
+}
+if [ -L .gitignore ]; then
+  # B134 REVERTS B122: git >= 2.32 opens .gitignore O_NOFOLLOW and refuses a symlink
+  # outright ("unable to access '.gitignore': Too many levels of symbolic links"), so
+  # a stow-style link CARRYING the rule still protects nothing — the personal settings
+  # sit one `git add -A` from history while the B122 branch counted the slot "in
+  # order" and let the stamp advance. B122's premise (the link's content reaches git)
+  # was tested against pre-2.32 behaviour. Fail early with the real cause (D32's
+  # doctrine): BLCK, name the git behaviour, hand the remedy. sync still never writes
+  # through the link; there is deliberately no git-version gate — a link that only
+  # works on a 2021-era git is not a setup the standard should bless.
+  printf '  %sBLCK%s  .gitignore (is a symlink — git 2.32+ refuses to read a symlinked .gitignore, so its rules protect NOTHING here; replace the link with a regular file carrying its rules, then re-run)\n' "$Y" "$N"
+  blockedw=$((blockedw+1))
+elif ! dst_ok "$ROOT/.gitignore" ".gitignore"; then
+  blockedw=$((blockedw+1))
+elif [ ! -e .gitignore ]; then
+  if [ ! -f "$TEMPLATE/.gitignore.skel" ]; then
+    printf '  %s???%s  .gitignore.skel (missing from template — this checkout of the standard is incomplete)\n' "$Y" "$N"
+    tmplmiss=$((tmplmiss+1))
+  else
+    printf '  %sADD %s  .gitignore (from skeleton — carries the personal-file ignore rules)\n' "$G" "$N"
+    if [ -n "$CHECK" ] || cp "$TEMPLATE/.gitignore.skel" .gitignore; then
+      added=$((added+1))
+    else
+      printf '  %sFAIL%s  .gitignore (write failed — see the error above)\n' "$Y" "$N"; wfail=$((wfail+1))
+    fi
+  fi
+elif ! ign_covered .gitignore || ! ign_local_covered .gitignore; then
+  # ONE slot action (one counter, as before) appends only the rule(s) still missing.
+  ign_add="" ign_what=""
+  if ! ign_covered .gitignore; then ign_add='\n# Claude Code personal settings + its atomic-write temp siblings — machine-local, never committed.\n.claude/settings.local.json*\n'; ign_what="+ .claude/settings.local.json*"; fi
+  if ! ign_local_covered .gitignore; then ign_add="$ign_add"'\n# Claude Code personal instructions (CLAUDE.local.md, at any depth) — personal, never committed.\nCLAUDE.local.md\n'; ign_what="${ign_what:+$ign_what, }+ CLAUDE.local.md"; fi
+  printf '  %sAMND%s  .gitignore (%s — the ignore rules must travel with the repo)\n' "$C" "$N" "$ign_what"
+  if [ -n "$CHECK" ] || printf '%b' "$ign_add" >> .gitignore; then
+    updated=$((updated+1))
+  else
+    printf '  %sFAIL%s  .gitignore (append failed — see the error above)\n' "$Y" "$N"; wfail=$((wfail+1))
+  fi
+else
+  same=$((same+1))
+fi
+
+# A synced bin/track means the committed tracker.html may now be stale relative to the
+# NEW renderer while tracker.md is untouched — a gap the commit guard never fires on,
+# because no staged tracker.md triggers its check (B55). Refresh the generated page
+# when the target has a rendered pair; the page is generated output, not authored
+# content, so this stays inside sync's contract. In DOGFOOD mode this runs on EVERY
+# invocation and tolerates the bin/track symlink: there the renderer's canon is
+# template/bin/track itself, so no UPD line ever marks it changed (B55's dogfood hole),
+# and the symlink into template/ is the sanctioned arrangement.
+# The probe ALSO arms whenever the target's bin/track already MATCHES the canon
+# (re-attack on B106): the one-shot track_updated forgot a re-render that FAILed — the
+# next run saw no UPD, skipped this block entirely, and the stamp advanced over the
+# same undelivered page the HOLD line had just refused. A hand-edited stale pair gets
+# repaired by the same probe; the page is generated output either way.
+if { [ "$track_updated" = 1 ] || [ -n "$DOGFOOD" ] \
+     || cmp -s "$TEMPLATE/bin/track" "$ROOT/bin/track" 2>/dev/null; } \
+   && [ -f bin/track ] && [ -x bin/track ] \
+   && { [ ! -L bin/track ] || [ -n "$DOGFOOD" ]; } \
+   && [ -f docs/dev-notes/tracker.md ] && [ ! -L docs/dev-notes/tracker.md ] \
+   && [ -f docs/dev-notes/tracker.html ]; then
+  if ! dst_ok "$ROOT/docs/dev-notes/tracker.html" "docs/dev-notes/tracker.html"; then
+    blockedw=$((blockedw+1))
+  elif [ -n "$CHECK" ]; then
+    # Report-only must not EXECUTE the target's bin/track (target-controlled code) nor
+    # write its temp files into the target — and probing with the target's OLD renderer
+    # predicts the wrong thing anyway (B121). Probe with THIS checkout's canonical
+    # renderer on COPIES in a temp dir: exactly what a real sync would deliver.
+    if [ -f "$TEMPLATE/bin/track" ] && [ -x "$TEMPLATE/bin/track" ]; then
+      gtmp="$(mktemp -d)"
+      if ! cp docs/dev-notes/tracker.md docs/dev-notes/tracker.html "$gtmp/" 2>/dev/null; then
+        # Unreadable pair: a real sync would FAIL the re-render, not perform it — the
+        # prediction must say so (re-attack), not promise a GEN that cannot happen.
+        printf '  %sFAIL%s  docs/dev-notes/tracker.html (tracker pair unreadable — a real sync could not re-render it; fix permissions)\n' "$Y" "$N"
+        wfail=$((wfail+1))
+      elif TRACKER_FILE="$gtmp/tracker.md" "$TEMPLATE/bin/track" render --check >/dev/null 2>&1; then
+        : # already current under the canonical renderer
+      else
+        printf '  %sGEN %s  docs/dev-notes/tracker.html (stale under the current renderer — sync will re-render it)\n' "$C" "$N"
+        genpend=$((genpend+1))
+      fi
+      rm -rf "$gtmp"
+    fi   # template's track missing/unusable: the machinery loop already ???'d that
+  elif TRACKER_FILE="$ROOT/docs/dev-notes/tracker.md" ./bin/track render --check >/dev/null 2>&1; then
+    : # already current under the new renderer (just synced, so this runs OUR code)
+  elif TRACKER_FILE="$ROOT/docs/dev-notes/tracker.md" ./bin/track render >/dev/null 2>&1 \
+       && [ -f docs/dev-notes/tracker.html ]; then
+    # Counted as an update (re-attack): a dogfood run whose ONLY change was this
+    # re-render used to print an all-zero summary and skip the 'synced.' nudge while
+    # a repo file had just been rewritten.
+    printf '  %sGEN %s  docs/dev-notes/tracker.html (re-rendered — the pair was stale under the current renderer)\n' "$C" "$N"
+    updated=$((updated+1))
+  else
+    printf '  %sFAIL%s  docs/dev-notes/tracker.html (re-render failed — run ./bin/track render yourself)\n' "$Y" "$N"
+    wfail=$((wfail+1))
+  fi
+fi
+
+# A new bin/register can leave the register's generated parts stale: its summary block and
+# DEVIATIONS.html follow the renderer. Unlike tracker.html, sync does NOT re-render here —
+# the summary block lives inside the authored DEVIATIONS.md, which sync never writes. It
+# says so instead, with the command; verify's register check warns until it is run. Probed
+# with THIS checkout's register on the target's register (read-only: check writes nothing).
+# Not counted as drift: a re-run of sync could not clear it.
+if [ "$arch" = vendor-derived ] && { [ "$reg_updated" = 1 ] || [ -n "$CHECK" ]; } \
+   && [ -f "$TEMPLATE/bin/register" ] && [ -f docs/official/DEVIATIONS.md ] && [ ! -L docs/official/DEVIATIONS.md ]; then
+  rmsg="$(REGISTER_FILE="$ROOT/docs/official/DEVIATIONS.md" bash "$TEMPLATE/bin/register" check 2>&1)"
+  case "$rmsg" in
+    *STALE*) printf '  %sNOTE%s  docs/official/DEVIATIONS.md + DEVIATIONS.html are stale under the %s register — run: bin/register render, then commit both\n' "$C" "$N" "$( [ -n "$CHECK" ] && echo canonical || echo new )" ;;
+  esac
+fi
+
+# version stamp: record which standard VERSION this repo was last synced to. Runs LAST,
+# after every slot that can FAIL/BLCK/???, because the stamp only advances over a sync
+# that fully delivered (B106) — see the HOLD branch below.
+stamp_behind=0
+# Same destination discipline as the machinery: a bare `>` would write THROUGH a
+# symlinked .repo-standard-version into a foreign file (B59's class), so the stamp
+# gets the dst_ok gate and a tmp+mv write of its own. The gate runs UNCONDITIONALLY —
+# a symlinked stamp BLCKs even while its content is current, the same fail-early
+# semantic the machinery loop applies.
+if [ -n "$DOGFOOD" ]; then
+  # Source tree: never stamped (B42 — a stamp would mark the source as its own
+  # consumer). A stray one already present is exactly B42's artifact — say so.
+  if [ -e .repo-standard-version ] || [ -L .repo-standard-version ]; then
+    # Its own counter (re-attack): riding tmplmiss made the exit summary call this
+    # 'missing template file(s)' — a wrong diagnosis name for a complete checkout.
+    printf '  %s??? %s  .repo-standard-version (stray stamp in the SOURCE tree — remove it; the source is not a consumer)\n' "$Y" "$N"
+    strays=$((strays+1))
+  fi
+elif ! dst_ok .repo-standard-version .repo-standard-version; then
+  blockedw=$((blockedw+1))
+elif [ "$cur_ver" != "$VERSION" ]; then
+  if [ $((wfail+tmplmiss+blockedw)) -gt 0 ]; then
+    # The stamp records a sync that HAPPENED (B106): advancing it over FAIL/BLCK/???
+    # lines writes fiction — verify would bless machinery that never arrived, and the
+    # B43 downgrade guard would lock every older checkout out of the repair re-run.
+    printf '  %sHOLD%s  version stamp stays %s (machinery not fully delivered — fix the FAIL/BLCK/??? lines above, then re-run sync)\n' "$Y" "$N" "$cur_ver"
+  else
+    stamp_behind=1
+    arch_note="" arch_field="($arch)"
+    [ "$arch" = unknown ] && arch_note=" (archetype unknown — re-run init --authored|--vendor-derived to record it)"
+    if [ "$arch" = both ]; then
+      arch_field="(authored) (vendor-derived)"
+      arch_note=" (stamp names BOTH archetypes — kept as-is; re-run init --authored|--vendor-derived to fix it)"
+    fi
+    printf '  %sSTMP%s  version stamp %s -> %s%s\n' "$C" "$N" "$cur_ver" "$VERSION" "$arch_note"
+    if [ -z "$CHECK" ]; then
+      stamp_tmp=".repo-standard-version.tmp.$$"
+      if printf 'repo-standard %s stamped %s %s\n' "$VERSION" "$(date +%F)" "$arch_field" >"$stamp_tmp" \
+         && mv -f "$stamp_tmp" .repo-standard-version; then
+        :
+      else
+        rm -f "$stamp_tmp"
+        printf '  %sFAIL%s  .repo-standard-version (write failed — see the error above)\n' "$Y" "$N"
+        wfail=$((wfail+1)); stamp_behind=0
+      fi
+    fi
+  fi
+fi
+
+printf '\n%s%d updated, %d added, %d perm-fixed, %d unchanged, %d conflicts, %d blocked, %d failed%s\n' \
+  "$D" "$updated" "$added" "$permfix" "$same" "$conflicts" "$blockedw" "$((wfail+tmplmiss))" "$N"
+drift=$((updated+added+permfix+stamp_behind+conflicts+blockedw+wfail+tmplmiss+genpend+strays))
+if [ -n "$CHECK" ]; then
+  if [ "$drift" -gt 0 ]; then
+    # "run sync to apply" would overpromise when the only drift is CFLT/BLCK/??? — a
+    # plain sync leaves those exactly as --check found them.
+    if [ $((updated+added+permfix+stamp_behind+genpend)) -gt 0 ]; then
+      printf '%s(--check: out of date — run sync to apply)%s\n' "$D" "$N"
+    else
+      printf '%s(--check: conflicts / blocked destinations / incomplete standard only — sync cannot fix these; see lines above)%s\n' "$D" "$N"
+    fi
+    exit 1
+  fi
+  printf '%sup to date%s\n' "$D" "$N"; exit 0
+fi
+if [ $((conflicts+blockedw+wfail+tmplmiss+strays)) -gt 0 ]; then
+  printf '%ssync finished with %d conflict(s), %d blocked write(s), %d failed write(s), %d missing template file(s), %d stray stamp(s) — see CFLT/BLCK/FAIL/??? lines above.%s\n' \
+    "$D" "$conflicts" "$blockedw" "$wfail" "$tmplmiss" "$strays" "$N"
+  exit 1
+fi
+[ "$drift" -gt 0 ] && printf '%ssynced. review the changes and commit when ready.%s\n' "$D" "$N"
+exit 0

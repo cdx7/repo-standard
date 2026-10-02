@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# fleet — the adoption registry: which repos adopted the standard, when, and at which
+#   version (see ../standard/STANDARD.md, toolkit).
+#   fleet [dir ...] [--write [FILE]] [--check [FILE]]
+# Walks each dir: a git toplevel is one repo; any other dir is a folder of repos (up to two
+# levels down, hidden dirs skipped). Default dir: the folder that holds the standard's own
+# family of folders (<checkout>/../..). Symlinked duplicates fold by real path. Per repo it
+# reads the stamp (.repo-standard-version, line 1), the ADOPTION commit — the first commit
+# that added the stamp; sync rewrites the stamp date on every refresh, so git is the only
+# honest source of the adoption date and version — and the origin URL. Prints ONE table.
+#   --write [FILE] : refresh the block between <!-- fleet:begin --> and <!-- fleet:end --> in
+#                    FILE (default: this checkout's docs/dev-notes/adoption.md), creating it
+#                    after the H1 when absent. Prose outside the markers stays hand-authored.
+#   --check [FILE] : exit 1 if that block is missing or stale; change nothing.
+# Read-only otherwise; never commits.
+set -uo pipefail
+unset CDPATH   # an exported CDPATH would reroute bare `cd` (B71's class)
+
+SELF="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)"
+errx(){ printf 'fleet: %s\n' "$*" >&2; exit 2; }
+
+DIRS=() WRITE="" CHECK="" FILE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --write) WRITE=1; shift; if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then FILE="$1"; shift; fi ;;
+    --check) CHECK=1; shift; if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then FILE="$1"; shift; fi ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -*) errx "unknown option '$1'" ;;
+    *) DIRS+=("$1"); shift ;;
+  esac
+done
+[ -n "$WRITE" ] && [ -n "$CHECK" ] && errx "--write and --check are exclusive"
+[ ${#DIRS[@]} -gt 0 ] || DIRS=("$(cd "$SELF/../../.." && pwd)")
+[ -n "$FILE" ] || FILE="$SELF/../docs/dev-notes/adoption.md"
+
+real(){ readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
+is_top(){ local t; t="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1; [ "$(real "$t")" = "$(real "$1")" ]; }
+
+# --- discovery: real paths, deduplicated, each remembered with the base it was found under
+ENTRIES=() SEEN="|"
+add_repo(){ local r; r="$(real "$1")"; case "$SEEN" in *"|$r|"*) return ;; esac; SEEN="$SEEN$r|"; ENTRIES+=("$2	$r"); }
+scan(){ # $1 dir  $2 depth  $3 base
+  local sub
+  if is_top "$1"; then add_repo "$1" "$3"; return; fi
+  [ "$2" -lt 2 ] || return 0
+  for sub in "$1"/*/; do
+    [ -d "$sub" ] || continue
+    scan "${sub%/}" $(($2+1)) "$3"
+  done
+}
+for d in "${DIRS[@]}"; do
+  [ -d "$d" ] || errx "no such directory: $d"
+  scan "$(real "$d")" 0 "$(real "$d")"
+done
+[ ${#ENTRIES[@]} -gt 0 ] || errx "no git repositories found under: ${DIRS[*]}"
+
+# --- per-repo facts
+url_of(){
+  local u; u="$(git -C "$1" remote get-url origin 2>/dev/null)" || { printf '%s' '—'; return; }
+  case "$u" in
+    git@*:*)     u="${u#git@}"; u="${u/://}"; u="https://$u" ;;
+    ssh://git@*) u="${u#ssh://git@}"; u="https://$u" ;;
+  esac
+  printf '%s' "${u%.git}"
+}
+sp_ver="" sp_date="" sp_arch=""
+stamp_parse(){ # "repo-standard <ver> stamped <date> (<archetype>)" -> sp_ver sp_date sp_arch
+  sp_ver="" sp_date="" sp_arch=""
+  case "$1" in "repo-standard "*) set -- $1; sp_ver="${2:-}"; sp_date="${4:-}"; sp_arch="${5:-}"; sp_arch="${sp_arch#(}"; sp_arch="${sp_arch%)}" ;; esac
+}
+
+ROWS="" n_all=0 n_adopted=0 n_uncommitted=0
+for e in "${ENTRIES[@]}"; do
+  r="${e#*	}"; name="$(basename "$(dirname "$r")")/$(basename "$r")"   # parent/name: the fleet is split across sibling folders
+  n_all=$((n_all+1)); url="$(url_of "$r")"
+  if [ -f "$r/standard/STANDARD.md" ] && [ -x "$r/bin/sync" ] && [ -f "$r/VERSION" ]; then
+    ROWS="$ROWS$name	source	—	—	$(head -n1 "$r/VERSION")	—	(source)	$url"$'\n'; continue
+  fi
+  wt="$(head -n1 "$r/.repo-standard-version" 2>/dev/null || true)"
+  hd="$(git -C "$r" show HEAD:.repo-standard-version 2>/dev/null | head -n1 || true)"
+  adopt="$(git -C "$r" log --diff-filter=A --format='%H %cs' -- .repo-standard-version 2>/dev/null | tail -n1)"
+  if [ -z "$wt" ] && [ -z "$hd" ]; then
+    ROWS="$ROWS$name	not adopted	—	—	—	—	—	$url"$'\n'; continue
+  fi
+  if [ -n "$adopt" ]; then
+    ah="${adopt%% *}"; adate="${adopt#* }"
+    stamp_parse "$(git -C "$r" show "$ah:.repo-standard-version" 2>/dev/null | head -n1)"; aver="${sp_ver:-?}"
+  else adate="?"; aver="?"; fi
+  if [ -n "$wt" ]; then
+    stamp_parse "$wt"; cur="${sp_ver:-?}"; synced="${sp_date:-?}"; arch="${sp_arch:-?}"
+    if [ -n "$hd" ] || [ -n "$adopt" ]; then status="adopted"; n_adopted=$((n_adopted+1))
+    else status="stamp uncommitted"; adate="—"; aver="—"; n_uncommitted=$((n_uncommitted+1)); fi
+  else
+    stamp_parse "$hd"; cur="${sp_ver:-?}"; synced="${sp_date:-?}"; arch="${sp_arch:-?}"
+    status="stamp removed in worktree"; n_adopted=$((n_adopted+1))
+  fi
+  ROWS="$ROWS$name	$status	$adate	$aver	$cur	$synced	$arch	$url"$'\n'
+done
+
+# --- render: one aligned markdown table (tab-separated rows in, widths from the data)
+render(){
+  printf '**Fleet registry** — %s repos scanned, %s adopted, %s with an uncommitted stamp. Adoption date and version come from the first commit that added `.repo-standard-version`; the stamp'"'"'s own date is rewritten by every sync, so it is shown as "last synced".\n\n' "$n_all" "$n_adopted" "$n_uncommitted"
+  { printf 'Repo\tStatus\tAdopted\tVersion adopted\tCurrent\tLast synced\tArchetype\tURL\n'; printf '%s' "$ROWS" | LC_ALL=C sort -f -t"$(printf '\t')" -k1,1; } \
+  | awk -F'\t' '
+      { for (i=1;i<=NF;i++){ cell[NR,i]=$i; if (length($i)>w[i]) w[i]=length($i) } rows=NR; nf=NF }
+      END {
+        for (n=1;n<=rows;n++) {
+          line="|"; for (i=1;i<=nf;i++) line=line sprintf(" %-" w[i] "s |", cell[n,i]); print line
+          if (n==1) { line="|"; for (i=1;i<=nf;i++){ d=""; for(k=0;k<w[i];k++) d=d "-"; line=line " :" substr(d,2) " |" }; print line }
+        }
+      }'
+}
+BLOCK="$(render)"
+
+if [ -z "$WRITE" ] && [ -z "$CHECK" ]; then printf '%s\n' "$BLOCK"; exit 0; fi
+
+BEGIN='<!-- fleet:begin — generated by bin/fleet; edit nothing between the markers, run bin/fleet --write instead -->'
+END='<!-- fleet:end -->'
+[ -f "$FILE" ] || errx "no such file: $FILE"
+have_block(){ grep -qF '<!-- fleet:begin' "$FILE" && grep -qxF "$END" "$FILE"; }
+current_block(){ awk -v e="$END" '/^<!-- fleet:begin/{f=1; next} $0==e{f=0} f' "$FILE"; }
+if [ -n "$CHECK" ]; then
+  if ! have_block; then printf 'fleet: %s has no fleet block yet (run --write)\n' "$FILE" >&2; exit 1; fi
+  if [ "$(current_block)" = "$BLOCK" ]; then printf 'fleet block up to date (%s repos)\n' "$n_all"; exit 0; fi
+  printf 'fleet block STALE in %s (run --write)\n' "$FILE" >&2; exit 1
+fi
+tmp="$FILE.tmp.$$"
+if have_block; then
+  awk -v b="$BEGIN" -v e="$END" -v blk="$BLOCK" '
+    /^<!-- fleet:begin/ { print b; print blk; f=1; next }
+    $0==e { print; f=0; next }
+    !f' "$FILE" > "$tmp"
+else
+  # No block yet: place it after the H1 (and the blank line that follows it).
+  awk -v b="$BEGIN" -v e="$END" -v blk="$BLOCK" '
+    { print }
+    !done && /^# / { getline nl; print nl; if (nl!="") print ""; print b; print blk; print e; print ""; done=1 }' "$FILE" > "$tmp"
+fi
+mv -f "$tmp" "$FILE" || { rm -f "$tmp"; errx "could not write $FILE"; }
+printf 'fleet block written to %s (%s repos, %s adopted)\n' "$FILE" "$n_all" "$n_adopted"
