@@ -4,7 +4,7 @@
 # Re-copies the canonical, non-authored files (settings.json, hooks, pre-commit, track,
 # REPO-STANDARD.md, and register in a vendor-derived repo) when they differ, shows a diff of each change, restores lost exec bits (worktree AND
 # committed index mode), repairs the .gitignore slot for the personal Claude files
-# (.claude/settings.local.json*, CLAUDE.local.md), refreshes the
+# (.claude/settings.local.json*, CLAUDE.local.md) and the tools' temp files, refreshes the
 # generated tracker.html when the renderer itself changed, and refreshes
 # .repo-standard-version. Never touches authored content (README, docs, tracker.md).
 # Does NOT commit.
@@ -350,6 +350,32 @@ ign_local_covered(){
       if (l ~ re) c = neg ? 0 : 1 }
     END{ exit c ? 0 : 1 }' "$1" 2>/dev/null
 }
+# bin/track's temp-file net (B148): the skeleton carries four rules for the tracker pair's
+# atomic-write temp files, but an EXISTING .gitignore used to get only the personal-file
+# rules, so a repo that came with its own .gitignore never got the net at all. The skeleton
+# also carries bin/register's two (B152), owed only where bin/register goes: a vendor-derived
+# repo, judged from the stamp as for MACHINERY above (an authored, unknown or both-archetype
+# stamp gets none).
+# Prints each rule of $2 (space-separated) still missing from $1, one per line, under the
+# same model as the two predicates above (last match wins, BOM, CR and trailing-space
+# handling); the exact skeleton line or its `**/` form counts. Keep both lists in lockstep
+# with template/.gitignore.skel, and this awk in lockstep with bin/init's copy.
+IGN_TRACK_RULES="tracker.md.tmp.* tracker.html.tmp.* tracker.md.data.* tracker-hwm.tmp.*"
+IGN_REG_RULES=""; [ "$arch" = vendor-derived ] && IGN_REG_RULES="DEVIATIONS.md.tmp.* DEVIATIONS.html.tmp.*"
+ign_temp_missing(){
+  LC_ALL=C awk -v rules="$2" '
+    BEGIN{ bom=sprintf("%c%c%c",239,187,191)
+           n=split(rules, want, " ")
+           for (i=1;i<=n;i++) have[want[i]]=0 }
+    { if (NR==1 && index($0,bom)==1) $0=substr($0,4)
+      sub(/\r$/,"")
+      while ($0 ~ / $/ && $0 !~ /\\ $/) sub(/ $/,"")
+      neg=0; l=$0
+      if (substr(l,1,1)=="!"){ neg=1; l=substr(l,2) }
+      if (substr(l,1,3)=="**/") l=substr(l,4)
+      if (l in have) have[l] = neg ? 0 : 1 }
+    END{ for (i=1;i<=n;i++) if (!have[want[i]]) print want[i] }' "$1" 2>/dev/null
+}
 if [ -L .gitignore ]; then
   # B134 REVERTS B122: git >= 2.32 opens .gitignore O_NOFOLLOW and refuses a symlink
   # outright ("unable to access '.gitignore': Too many levels of symbolic links"), so
@@ -376,11 +402,25 @@ elif [ ! -e .gitignore ]; then
       printf '  %sFAIL%s  .gitignore (write failed — see the error above)\n' "$Y" "$N"; wfail=$((wfail+1))
     fi
   fi
-elif ! ign_covered .gitignore || ! ign_local_covered .gitignore; then
-  # ONE slot action (one counter, as before) appends only the rule(s) still missing.
+elif ! ign_covered .gitignore || ! ign_local_covered .gitignore \
+     || [ -n "$(ign_temp_missing .gitignore "$IGN_TRACK_RULES $IGN_REG_RULES")" ]; then
+  # ONE slot action (one counter, as before) appends only the rule(s) still missing,
+  # bin/track's temp-file net included (B148), and bin/register's where it is owed (B152).
   ign_add="" ign_what=""
   if ! ign_covered .gitignore; then ign_add='\n# Claude Code personal settings + its atomic-write temp siblings — machine-local, never committed.\n.claude/settings.local.json*\n'; ign_what="+ .claude/settings.local.json*"; fi
   if ! ign_local_covered .gitignore; then ign_add="$ign_add"'\n# Claude Code personal instructions (CLAUDE.local.md, at any depth) — personal, never committed.\nCLAUDE.local.md\n'; ign_what="${ign_what:+$ign_what, }+ CLAUDE.local.md"; fi
+  ign_tmiss="$(ign_temp_missing .gitignore "$IGN_TRACK_RULES")"
+  if [ -n "$ign_tmiss" ]; then
+    ign_tn=0; ign_add="$ign_add"'\n# bin/track'"'"'s atomic-write temp files — a safety net that travels with the tool.\n'
+    while IFS= read -r ign_r; do ign_add="$ign_add$ign_r"'\n'; ign_tn=$((ign_tn+1)); done <<<"$ign_tmiss"
+    ign_what="${ign_what:+$ign_what, }+ $ign_tn tracker temp-file rule$([ "$ign_tn" = 1 ] || echo s)"
+  fi
+  ign_rmiss="$(ign_temp_missing .gitignore "$IGN_REG_RULES")"
+  if [ -n "$ign_rmiss" ]; then
+    ign_rn=0; ign_add="$ign_add"'\n# bin/register'"'"'s atomic-write temp files — a safety net that travels with the tool.\n'
+    while IFS= read -r ign_r; do ign_add="$ign_add$ign_r"'\n'; ign_rn=$((ign_rn+1)); done <<<"$ign_rmiss"
+    ign_what="${ign_what:+$ign_what, }+ $ign_rn register temp-file rule$([ "$ign_rn" = 1 ] || echo s)"
+  fi
   printf '  %sAMND%s  .gitignore (%s — the ignore rules must travel with the repo)\n' "$C" "$N" "$ign_what"
   if [ -n "$CHECK" ] || printf '%b' "$ign_add" >> .gitignore; then
     updated=$((updated+1))

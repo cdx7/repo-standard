@@ -375,10 +375,13 @@ plus these rules that those sections leave open:
     form, empty Types and Sources tables, the marker pair);
   - renders `DEVIATIONS.html` when absent, as it does `tracker.html`;
   - pins `bin/register text eol=lf` and ignores the tool's temp files, through the two
-    skeletons.
+    skeletons; a `.gitignore` the repo already has gains whichever of the two temp-file
+    rules it lacks (B152).
 - **`sync`:**
   - carries `bin/register` only when the stamp says `(vendor-derived)` (`unknown` and
     both-archetype stamps get none);
+  - under the same test, adds whichever of the tool's two temp-file ignore rules the repo's
+    `.gitignore` lacks (B152);
   - does not re-render the register, since its summary block sits inside the authored file.
     When the tool's output would change, it prints a NOTE with the command, counted as no
     drift.

@@ -167,6 +167,13 @@ personal directives.
 - `init` creates the `.gitignore` when absent and otherwise appends only the missing rule or
   rules, never rewriting ignores you authored (for the settings, the exact name plus a `.tmp.*`
   or `.*` sibling rule also counts as covered).
+- The same append carries `bin/track`'s four temp-file rules (`tracker.md.tmp.*`,
+  `tracker.html.tmp.*`, `tracker.md.data.*`, `tracker-hwm.tmp.*`) when the file lacks any of
+  them (B148), so a repo that arrives with its own `.gitignore` gets the same net as one built
+  from the skeleton.
+- In a vendor-derived repo it also carries `bin/register`'s two (`DEVIATIONS.md.tmp.*`,
+  `DEVIATIONS.html.tmp.*`), judged as `bin/register` itself is: from the flag in `init`, from
+  the stamp in `sync` (B152). An authored repo gets neither.
 - `verify` resolves *which file* supplies each rule — for `settings.local.json` and a temp
   sibling, for `CLAUDE.local.md` at the root and in a subdirectory — and warns unless it is a
   committed `.gitignore` inside the working tree: asking git whether the path is ignored is not
@@ -470,11 +477,12 @@ with a diff per change and exec-bit repair — both the worktree bit and the **c
 mode** (`100644` → `100755` via `git update-index --chmod=+x`; this stages a mode change, and
 you still gate the commit); refreshes the version stamp.
 
-- It also repairs the `.gitignore` slot for both personal files under `init`'s exact contract
-  (create from the skeleton when absent, append only the missing rules when uncovered, never
-  rewrite authored rules; a symlinked `.gitignore` is refused outright — see the slot paragraph
-  above). The slot, both rules together, shares `sync`'s summary counter, so a healthy run
-  reads `7 unchanged`, not 6 (`8 unchanged` in a vendor-derived repo).
+- It also repairs the `.gitignore` slot for both personal files and the tools' temp files
+  (`bin/register`'s in a vendor-derived repo only) under `init`'s exact contract (create from
+  the skeleton when absent, append only the missing rules when uncovered, never rewrite
+  authored rules; a symlinked `.gitignore` is refused outright — see the slot paragraph
+  above). The slot, all its rules together, shares `sync`'s summary counter, so a healthy
+  run reads `7 unchanged`, not 6 (`8 unchanged` in a vendor-derived repo).
 - It re-renders an existing `tracker.html` when `bin/track` itself was updated — a renderer
   change stales the page with no `tracker.md` edit, which is the one drift the commit guard
   never fires on.
@@ -500,27 +508,39 @@ you still gate the commit); refreshes the version stamp.
   `template/` into the repo's live copies (previously a hand step) and writes no version stamp
   and no `REPO-STANDARD.md` — the source is not its own consumer.
 
-### `fleet [dir …] [--write [FILE]] [--check [FILE]]`
+### `fleet [entry …] [--scope FILE] [--write [FILE]] [--check [FILE]] [--offline] [--jobs N]`
 
-The adoption registry — maintainer-side, never shipped to consumers. Walks each dir (a git
-toplevel is one repo; any other dir is a folder of repos, two levels down, hidden dirs skipped;
-default: the folder above the standard's own family of folders) and prints one table: repo as
-`parent/name`, status, adoption date, version adopted, current version, last synced, archetype,
-origin URL.
+The adoption registry — maintainer-side, never shipped to consumers. Asks git, not the disk,
+so any host serves (GitHub, GitLab, Gitea, SourceForge, cgit, gitweb, a local path). The scope
+is a file, `docs/dev-notes/fleet-scope` by default, one entry per line: `github.com/OWNER`,
+every repository of that GitHub user or organization the `gh` token can see, forks and
+archived ones left out (the one host-specific line, and the only thing that needs `gh`); a
+clone URL (`https://`, `ssh://`, `git://`, `git@host:path`, or a local path), one repository
+on any host, always included; `-host/path`, left out; `#` comments. Entries on the command
+line add to it in a print-only run. Prints one table: repo as `host/path`, status, adoption
+date, version adopted, current version, last synced, archetype, clone URL.
 
-- The adoption date and version come from **git** — the first commit that added
-  `.repo-standard-version` and that commit's copy of the stamp — because `sync` rewrites the
-  stamp's date on every refresh; the stamp's own date is reported as "last synced". Both are
-  read on the checked-out `HEAD`, so a repo parked on a throwaway branch reads as adopted: run
-  `--write` only with every repo on its working branch.
-- Statuses: `adopted`; `not adopted`; `stamp uncommitted` (init ran, the adoption commit has
-  not); `stamp removed in worktree`; `source` (this checkout, current = `VERSION`).
+- Each repository is mirrored bare and blobless under `$XDG_CACHE_HOME/repo-standard/fleet`
+  (default `~/.cache/…`) and fetched on every run, N at a time (default 4; the first run
+  clones). A host without partial-clone support gets a full mirror, which is only slower.
+  Credentials are git's own — the `gh` credential helper for GitHub over https, ssh keys, or
+  whatever the host uses; a repository that asks for a password is an error, never a prompt.
+- Everything is read from the **default branch as pushed to the host**, so a migration in
+  progress, a stamp not yet committed or a branch that is not the default never shows: a row
+  changes when a push lands. The adoption date and version come from **git** — the first
+  commit that added `.repo-standard-version` and that commit's copy of the stamp — because
+  `sync` rewrites the stamp's date on every refresh; the stamp's own date is reported as
+  "last synced".
+- Statuses: `adopted`; `not adopted`; `empty` (no commit on the default branch); `source`
+  (holds `standard/STANDARD.md` and `VERSION`; current = `VERSION`).
 - `--write` refreshes the block between `<!-- fleet:begin -->` and `<!-- fleet:end -->` at the
   top of `docs/dev-notes/adoption.md` (or FILE), creating it after the H1 when absent — the way
   `track render` owns `tracker.html`; the prose around it stays hand-authored. `--check` exits
-  1 when that block is missing or stale.
-- Symlinked duplicate folders fold by real path; `git@` and `ssh://` origins are shown as
-  `https://` URLs.
+  1 when that block is missing or stale. Both take the scope file alone, so the committed
+  table is reproducible from it, and both fetch: `--offline`, which reads the mirrors as they
+  are, is for a print-only run.
+- An entry that cannot be listed or fetched is reported on stderr: the table is printed
+  without it and the exit is 1; `--write` and `--check` then write nothing and exit 2.
 
 The split is deliberate: the toolkit executes the **mechanical spine** (deterministic
 scaffolding, checking, copying) and leaves the **judgment** (what to write, when to roll a

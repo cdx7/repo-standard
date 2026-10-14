@@ -1,118 +1,221 @@
 #!/usr/bin/env bash
-# fleet — the adoption registry: which repos adopted the standard, when, and at which
-#   version (see ../standard/STANDARD.md, toolkit).
-#   fleet [dir ...] [--write [FILE]] [--check [FILE]]
-# Walks each dir: a git toplevel is one repo; any other dir is a folder of repos (up to two
-# levels down, hidden dirs skipped). Default dir: the folder that holds the standard's own
-# family of folders (<checkout>/../..). Symlinked duplicates fold by real path. Per repo it
-# reads the stamp (.repo-standard-version, line 1), the ADOPTION commit — the first commit
-# that added the stamp; sync rewrites the stamp date on every refresh, so git is the only
-# honest source of the adoption date and version — and the origin URL. Prints ONE table.
+# fleet — the adoption registry: which repositories adopted the standard, when, and at which
+#   version (see ../standard/STANDARD.md, toolkit). Asks git, so any host serves.
+#   fleet [entry ...] [--scope FILE] [--write [FILE]] [--check [FILE]] [--offline] [--jobs N]
+# The scope (default: this checkout's docs/dev-notes/fleet-scope; entries on the command line
+# add to it in a print-only run) lists, one per line: `github.com/OWNER`, every repository of
+# that GitHub user or organization the `gh` token can see, forks and archived ones left out;
+# a clone URL (https://, ssh://, git://, git@host:path, or a local path), one repository on
+# any host, always included; `-host/path`, left out; `#` comments. Each repository is mirrored
+# bare and blobless under $XDG_CACHE_HOME/repo-standard/fleet (default ~/.cache/…) and fetched
+# every run, N at a time (default 4). From the mirror's default branch, as pushed: the stamp
+# (.repo-standard-version, line 1); the ADOPTION commit — the first that added the stamp;
+# sync rewrites the stamp's date on every refresh, so git is the only honest source of the
+# adoption date and version — and the stamp as it was then. Prints ONE table, rows named
+# host/path.
 #   --write [FILE] : refresh the block between <!-- fleet:begin --> and <!-- fleet:end --> in
 #                    FILE (default: this checkout's docs/dev-notes/adoption.md), creating it
 #                    after the H1 when absent. Prose outside the markers stays hand-authored.
 #   --check [FILE] : exit 1 if that block is missing or stale; change nothing.
-# Read-only otherwise; never commits.
+#   --offline      : read the mirrors as they are and fetch nothing (print only).
+# An entry that cannot be listed or fetched is reported on stderr: the table is printed
+# without it and the exit is 1; --write and --check then write nothing and exit 2. Never
+# commits.
 set -uo pipefail
 unset CDPATH   # an exported CDPATH would reroute bare `cd` (B71's class)
+export GIT_TERMINAL_PROMPT=0   # a repository that wants a password is an error, never a hang
 
 SELF="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")" && pwd)"
 errx(){ printf 'fleet: %s\n' "$*" >&2; exit 2; }
 
-DIRS=() WRITE="" CHECK="" FILE=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --write) WRITE=1; shift; if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then FILE="$1"; shift; fi ;;
-    --check) CHECK=1; shift; if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then FILE="$1"; shift; fi ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
-    -*) errx "unknown option '$1'" ;;
-    *) DIRS+=("$1"); shift ;;
-  esac
-done
-[ -n "$WRITE" ] && [ -n "$CHECK" ] && errx "--write and --check are exclusive"
-[ ${#DIRS[@]} -gt 0 ] || DIRS=("$(cd "$SELF/../../.." && pwd)")
-[ -n "$FILE" ] || FILE="$SELF/../docs/dev-notes/adoption.md"
-
-real(){ readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
-is_top(){ local t; t="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1; [ "$(real "$t")" = "$(real "$1")" ]; }
-
-# --- discovery: real paths, deduplicated, each remembered with the base it was found under
-ENTRIES=() SEEN="|"
-add_repo(){ local r; r="$(real "$1")"; case "$SEEN" in *"|$r|"*) return ;; esac; SEEN="$SEEN$r|"; ENTRIES+=("$2	$r"); }
-scan(){ # $1 dir  $2 depth  $3 base
-  local sub
-  if is_top "$1"; then add_repo "$1" "$3"; return; fi
-  [ "$2" -lt 2 ] || return 0
-  for sub in "$1"/*/; do
-    [ -d "$sub" ] || continue
-    scan "${sub%/}" $(($2+1)) "$3"
-  done
-}
-for d in "${DIRS[@]}"; do
-  [ -d "$d" ] || errx "no such directory: $d"
-  scan "$(real "$d")" 0 "$(real "$d")"
-done
-[ ${#ENTRIES[@]} -gt 0 ] || errx "no git repositories found under: ${DIRS[*]}"
-
-# --- per-repo facts
-url_of(){
-  local u; u="$(git -C "$1" remote get-url origin 2>/dev/null)" || { printf '%s' '—'; return; }
-  case "$u" in
-    git@*:*)     u="${u#git@}"; u="${u/://}"; u="https://$u" ;;
-    ssh://git@*) u="${u#ssh://git@}"; u="https://$u" ;;
-  esac
-  printf '%s' "${u%.git}"
-}
+# The stamp's line 1: "repo-standard <ver> stamped <date> (<archetype>)" -> sp_ver sp_date sp_arch
 sp_ver="" sp_date="" sp_arch=""
-stamp_parse(){ # "repo-standard <ver> stamped <date> (<archetype>)" -> sp_ver sp_date sp_arch
+stamp_parse(){
   sp_ver="" sp_date="" sp_arch=""
   case "$1" in "repo-standard "*) set -- $1; sp_ver="${2:-}"; sp_date="${4:-}"; sp_arch="${5:-}"; sp_arch="${sp_arch#(}"; sp_arch="${sp_arch%)}" ;; esac
 }
 
-ROWS="" n_all=0 n_adopted=0 n_uncommitted=0
-for e in "${ENTRIES[@]}"; do
-  r="${e#*	}"; name="$(basename "$(dirname "$r")")/$(basename "$r")"   # parent/name: the fleet is split across sibling folders
-  n_all=$((n_all+1)); url="$(url_of "$r")"
-  if [ -f "$r/standard/STANDARD.md" ] && [ -x "$r/bin/sync" ] && [ -f "$r/VERSION" ]; then
-    ROWS="$ROWS$name	source	—	—	$(head -n1 "$r/VERSION")	—	(source)	$url"$'\n'; continue
+# --- _fetch: one repository, run N at a time through xargs. Reads the job file (url, mirror
+# dir, row name, URL to show), writes the row to <job>.out; on failure writes no .out and
+# leaves git's words in <job>.err. Always exits 0 so xargs carries on.
+if [ "${1:-}" = _fetch ]; then
+  job="$2"; { IFS= read -r url; IFS= read -r dir; IFS= read -r name; IFS= read -r show; } < "$job"
+  out="$job.out" err="$job.err"; : > "$err"
+  run(){ if command -v timeout >/dev/null 2>&1; then timeout -k 10 "${FLEET_TIMEOUT:-300}" "$@"; else "$@"; fi; }
+  branch=""
+  if [ -z "${FLEET_OFFLINE:-}" ]; then
+    # The host's HEAD names the default branch; a bare mirror would otherwise keep the one
+    # it was cloned with. Checked first: it is also the quickest test of reach and access.
+    heads="$(run git ls-remote --symref -q -- "$url" HEAD 2>>"$err")" || exit 0
+    if [ ! -d "$dir" ]; then
+      # blob:none keeps the mirror to commits and trees; a host without partial-clone
+      # support makes git say so and clone in full, which is only slower.
+      run git clone -q --bare --filter=blob:none --no-tags -- "$url" "$dir" 2>>"$err" || { rm -rf "$dir"; exit 0; }
+    else
+      run git -C "$dir" fetch -q --prune --no-tags origin '+refs/heads/*:refs/heads/*' 2>>"$err" || exit 0
+    fi
+    branch="$(printf '%s\n' "$heads" | awk -F'\t' '$2=="HEAD" && sub(/^ref: refs\/heads\//,"",$1){print $1; exit}')"
+    [ -n "$branch" ] && git -C "$dir" symbolic-ref HEAD "refs/heads/$branch" 2>/dev/null
+  else
+    [ -d "$dir" ] || { printf 'no mirror yet: run once without --offline\n' >>"$err"; exit 0; }
+    branch="$(git -C "$dir" symbolic-ref --short -q HEAD 2>/dev/null)"
   fi
-  wt="$(head -n1 "$r/.repo-standard-version" 2>/dev/null || true)"
-  hd="$(git -C "$r" show HEAD:.repo-standard-version 2>/dev/null | head -n1 || true)"
-  adopt="$(git -C "$r" log --diff-filter=A --format='%H %cs' -- .repo-standard-version 2>/dev/null | tail -n1)"
-  if [ -z "$wt" ] && [ -z "$hd" ]; then
-    ROWS="$ROWS$name	not adopted	—	—	—	—	—	$url"$'\n'; continue
+  ref="refs/heads/$branch"
+  if [ -z "$branch" ] || ! git -C "$dir" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then
+    printf '%s\tempty\t—\t—\t—\t—\t—\t%s\n' "$name" "$show" > "$out"; exit 0
   fi
+  has(){ git -C "$dir" cat-file -e "$1" 2>/dev/null; }
+  blob(){ git -C "$dir" show "$1" 2>/dev/null | head -n1; }   # fetches the one blob on demand
+  if has "$ref:standard/STANDARD.md" && has "$ref:VERSION"; then
+    printf '%s\tsource\t—\t—\t%s\t—\t(source)\t%s\n' "$name" "$(blob "$ref:VERSION")" "$show" > "$out"; exit 0
+  fi
+  if ! has "$ref:.repo-standard-version"; then
+    printf '%s\tnot adopted\t—\t—\t—\t—\t—\t%s\n' "$name" "$show" > "$out"; exit 0
+  fi
+  stamp_parse "$(blob "$ref:.repo-standard-version")"; cur="${sp_ver:-?}" synced="${sp_date:-?}" arch="${sp_arch:-?}"
+  adopt="$(git -C "$dir" log --diff-filter=A --format='%H %cs' "$ref" -- .repo-standard-version 2>/dev/null | tail -n1)"
   if [ -n "$adopt" ]; then
     ah="${adopt%% *}"; adate="${adopt#* }"
-    stamp_parse "$(git -C "$r" show "$ah:.repo-standard-version" 2>/dev/null | head -n1)"; aver="${sp_ver:-?}"
+    stamp_parse "$(blob "$ah:.repo-standard-version")"; aver="${sp_ver:-?}"
   else adate="?"; aver="?"; fi
-  if [ -n "$wt" ]; then
-    stamp_parse "$wt"; cur="${sp_ver:-?}"; synced="${sp_date:-?}"; arch="${sp_arch:-?}"
-    if [ -n "$hd" ] || [ -n "$adopt" ]; then status="adopted"; n_adopted=$((n_adopted+1))
-    else status="stamp uncommitted"; adate="—"; aver="—"; n_uncommitted=$((n_uncommitted+1)); fi
-  else
-    stamp_parse "$hd"; cur="${sp_ver:-?}"; synced="${sp_date:-?}"; arch="${sp_arch:-?}"
-    status="stamp removed in worktree"; n_adopted=$((n_adopted+1))
+  printf '%s\tadopted\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$adate" "$aver" "$cur" "$synced" "$arch" "$show" > "$out"
+  exit 0
+fi
+
+# --- arguments
+ENTRIES=() WRITE="" CHECK="" FILE="" SCOPE="" OFFLINE="" JOBS=4
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --write) WRITE=1; shift; if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then FILE="$1"; shift; fi ;;
+    --check) CHECK=1; shift; if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] && [ ! -d "$1" ]; then FILE="$1"; shift; fi ;;
+    --scope) [ $# -ge 2 ] || errx "--scope needs a file"; SCOPE="$2"; shift 2 ;;
+    --offline) OFFLINE=1; shift ;;
+    --jobs) [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] || errx "--jobs needs a positive number"; JOBS="$2"; shift 2 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -?*) errx "unknown option '$1'" ;;
+    *) ENTRIES+=("$1"); shift ;;
+  esac
+done
+[ -n "$WRITE" ] && [ -n "$CHECK" ] && errx "--write and --check are exclusive"
+if [ -n "$WRITE$CHECK" ]; then
+  [ ${#ENTRIES[@]} -eq 0 ] || errx "--write and --check take the scope file alone: a committed table must be reproducible from it"
+  [ -z "$OFFLINE" ] || errx "--offline is for a print-only run: --write and --check fetch"
+fi
+[ -n "$FILE" ] || FILE="$SELF/../docs/dev-notes/adoption.md"
+[ -n "$SCOPE" ] || SCOPE="$SELF/../docs/dev-notes/fleet-scope"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/repo-standard/fleet"
+command -v git >/dev/null 2>&1 || errx "git is not installed"
+
+# --- the scope: the file's entries (comments and blanks dropped), then the command line's
+if [ -f "$SCOPE" ]; then
+  while IFS= read -r line; do ENTRIES+=("$line"); done < <(
+    sed -e 's/\r$//' -e 's/^[[:space:]]*#.*$//' -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$SCOPE" | grep -v '^$')
+elif [ ${#ENTRIES[@]} -eq 0 ] || [ -n "$WRITE$CHECK" ]; then
+  errx "no scope file: $SCOPE (one entry per line: github.com/OWNER, a clone URL, or -host/path to leave one out)"
+fi
+[ ${#ENTRIES[@]} -gt 0 ] || errx "the scope is empty: $SCOPE"
+
+# A repository's row name, host/path: the clone URL without scheme, user, port, a trailing
+# slash or .git. git@host:path and host:path are scp-like (a colon before the first slash).
+name_of(){
+  local u="$1"
+  u="${u%/}"; u="${u%.git}"; u="${u%/}"
+  case "$u" in *://*) u="${u#*://}"; u="${u#*@}" ;; esac
+  if [[ "$u" == *:* && "${u%%:*}" != */* ]]; then local h="${u%%:*}"; h="${h#*@}"; u="$h/${u#*:}"; fi
+  [[ "$u" =~ ^([^/:]+):[0-9]+/(.*)$ ]] && u="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  printf '%s' "$u"
+}
+lc(){ printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+
+TMP="$(mktemp -d)" || errx "cannot create a temp directory"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/jobs"
+OWNERS=() EXCL="|" EXCL_HIT="|" SEEN="|"
+n_owner=0 n_url=0 n_excl=0 n_arch=0 n_fork=0 n_err=0 n_jobs=0
+for e in "${ENTRIES[@]}"; do
+  case "$e" in -*) EXCL="$EXCL$(lc "$(name_of "${e#-}")")|" ;; esac
+done
+add_job(){ # $1 clone URL  $2 URL to show
+  local name key
+  name="$(name_of "$1")"; key="$(lc "$name")"
+  case "$EXCL" in *"|$key|"*) EXCL_HIT="$EXCL_HIT$key|"; n_excl=$((n_excl+1)); return ;; esac
+  case "$SEEN" in *"|$key|"*) return ;; esac
+  SEEN="$SEEN$key|"; n_jobs=$((n_jobs+1))
+  # The mirror's folder: the row name made file-safe, plus a checksum against collisions.
+  printf '%s\n%s\n%s\n%s\n' "$1" "$CACHE/$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_')__$(printf '%s' "$key" | cksum | cut -d' ' -f1)" "$name" "$2" \
+    > "$TMP/jobs/$(printf '%05d' "$n_jobs").job"
+}
+for e in "${ENTRIES[@]}"; do
+  case "$e" in -*) continue ;; esac
+  if [[ "$e" =~ ^(https?://)?github\.com/([^/]+)/?$ ]]; then OWNERS+=("${BASH_REMATCH[2]}"); n_owner=$((n_owner+1)); continue; fi
+  n_url=$((n_url+1)); add_job "$e" "$e"
+done
+for o in "${OWNERS[@]}"; do
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'fleet: github.com/%s: listing an owner needs gh (https://cli.github.com), logged in\n' "$o" >&2; n_err=$((n_err+1)); continue
   fi
-  ROWS="$ROWS$name	$status	$adate	$aver	$cur	$synced	$arch	$url"$'\n'
+  if ! listing="$(gh repo list "$o" --limit 1000 --json url,isArchived,isFork \
+        --jq '.[] | [.url, (.isArchived|tostring), (.isFork|tostring)] | @tsv' 2>"$TMP/gh.err")"; then
+    printf 'fleet: github.com/%s: %s\n' "$o" "$(grep -v '^$' "$TMP/gh.err" | tail -n1)" >&2; n_err=$((n_err+1)); continue
+  fi
+  while IFS=$'\t' read -r url archived fork; do
+    [ -n "$url" ] || continue
+    if [ "$archived" = true ]; then n_arch=$((n_arch+1)); continue; fi
+    if [ "$fork" = true ]; then n_fork=$((n_fork+1)); continue; fi
+    add_job "$url" "$url"
+  done <<< "$listing"
+done
+for e in "${ENTRIES[@]}"; do
+  case "$e" in -*) k="$(lc "$(name_of "${e#-}")")"; case "$EXCL_HIT" in *"|$k|"*) ;; *) printf 'fleet: %s matches no repository in the scope\n' "$e" >&2 ;; esac ;; esac
 done
 
-# --- render: one aligned markdown table (tab-separated rows in, widths from the data)
+# --- the mirrors, N at a time
+mkdir -p "$CACHE" || errx "cannot create the mirror cache: $CACHE"
+if [ "$n_jobs" -gt 0 ]; then
+  ls "$TMP"/jobs/*.job | sort | FLEET_OFFLINE="$OFFLINE" xargs -P "$JOBS" -I{} "$0" _fetch {}
+fi
+
+# --- rows, and the entries that failed
+ROWS="" n_all=0 n_adopted=0 n_source=0
+for job in "$TMP"/jobs/*.job; do
+  [ -f "$job" ] || continue
+  if [ -f "$job.out" ]; then
+    ROWS="$ROWS$(cat "$job.out")"$'\n'; n_all=$((n_all+1))
+    case "$(cut -f2 "$job.out")" in adopted) n_adopted=$((n_adopted+1)) ;; source) n_source=$((n_source+1)) ;; esac
+  else
+    name="$(sed -n '3p' "$job")"; why="$(grep -v '^$' "$job.err" | grep -m1 '^fatal:' || grep -v '^$' "$job.err" | tail -n1)"
+    case "$(sed -n '1p' "$job")" in https://github.com/*) case "$why" in *"could not read Username"*) why="$why (run: gh auth setup-git)" ;; esac ;; esac
+    printf 'fleet: %s: %s\n' "$name" "${why:-could not be read}" >&2; n_err=$((n_err+1))
+  fi
+done
+
+# --- render: one aligned markdown table (tab-separated rows in, widths from the data; no
+# alignment colons in the separator row, as the tables the standard writes since 0.5.0)
+pl(){ if [ "$1" = 1 ]; then printf '%s %s' "$1" "$2"; else printf '%s %s' "$1" "$3"; fi; }   # pl N one many
 render(){
-  printf '**Fleet registry** — %s repos scanned, %s adopted, %s with an uncommitted stamp. Adoption date and version come from the first commit that added `.repo-standard-version`; the stamp'"'"'s own date is rewritten by every sync, so it is shown as "last synced".\n\n' "$n_all" "$n_adopted" "$n_uncommitted"
+  printf '**Fleet registry** — %s: %s adopted, %s. Scope: %s (%s and %s left out) and %s listed by URL; %s left out by `-` lines. Each row is read from the repository'"'"'s default branch as pushed to its host; the adoption date and version come from the first commit that added `.repo-standard-version`, and the stamp'"'"'s own date, rewritten by every sync, is shown as "last synced".\n\n' \
+    "$(pl "$n_all" repository repositories)" "$n_adopted" "$(pl "$n_source" source sources)" "$(pl "$n_owner" "GitHub owner" "GitHub owners")" \
+    "$(pl "$n_arch" archived archived)" "$(pl "$n_fork" fork forks)" "$(pl "$n_url" repository repositories)" "$n_excl"
   { printf 'Repo\tStatus\tAdopted\tVersion adopted\tCurrent\tLast synced\tArchetype\tURL\n'; printf '%s' "$ROWS" | LC_ALL=C sort -f -t"$(printf '\t')" -k1,1; } \
   | awk -F'\t' '
       { for (i=1;i<=NF;i++){ cell[NR,i]=$i; if (length($i)>w[i]) w[i]=length($i) } rows=NR; nf=NF }
       END {
         for (n=1;n<=rows;n++) {
           line="|"; for (i=1;i<=nf;i++) line=line sprintf(" %-" w[i] "s |", cell[n,i]); print line
-          if (n==1) { line="|"; for (i=1;i<=nf;i++){ d=""; for(k=0;k<w[i];k++) d=d "-"; line=line " :" substr(d,2) " |" }; print line }
+          if (n==1) { line="|"; for (i=1;i<=nf;i++){ d=""; for(k=0;k<w[i];k++) d=d "-"; line=line " " d " |" }; print line }
         }
       }'
 }
 BLOCK="$(render)"
 
-if [ -z "$WRITE" ] && [ -z "$CHECK" ]; then printf '%s\n' "$BLOCK"; exit 0; fi
+if [ "$n_err" -gt 0 ] && [ -n "$WRITE$CHECK" ]; then
+  printf 'fleet: %s could not be read (above): nothing written\n' "$(pl "$n_err" entry entries)" >&2; exit 2
+fi
+if [ -z "$WRITE" ] && [ -z "$CHECK" ]; then
+  printf '%s\n' "$BLOCK"
+  [ "$n_err" -eq 0 ] || { printf 'fleet: %s could not be read (above): the table is incomplete\n' "$(pl "$n_err" entry entries)" >&2; exit 1; }
+  exit 0
+fi
 
 BEGIN='<!-- fleet:begin — generated by bin/fleet; edit nothing between the markers, run bin/fleet --write instead -->'
 END='<!-- fleet:end -->'
@@ -121,7 +224,7 @@ have_block(){ grep -qF '<!-- fleet:begin' "$FILE" && grep -qxF "$END" "$FILE"; }
 current_block(){ awk -v e="$END" '/^<!-- fleet:begin/{f=1; next} $0==e{f=0} f' "$FILE"; }
 if [ -n "$CHECK" ]; then
   if ! have_block; then printf 'fleet: %s has no fleet block yet (run --write)\n' "$FILE" >&2; exit 1; fi
-  if [ "$(current_block)" = "$BLOCK" ]; then printf 'fleet block up to date (%s repos)\n' "$n_all"; exit 0; fi
+  if [ "$(current_block)" = "$BLOCK" ]; then printf 'fleet block up to date (%s repositories)\n' "$n_all"; exit 0; fi
   printf 'fleet block STALE in %s (run --write)\n' "$FILE" >&2; exit 1
 fi
 tmp="$FILE.tmp.$$"
@@ -137,4 +240,4 @@ else
     !done && /^# / { getline nl; print nl; if (nl!="") print ""; print b; print blk; print e; print ""; done=1 }' "$FILE" > "$tmp"
 fi
 mv -f "$tmp" "$FILE" || { rm -f "$tmp"; errx "could not write $FILE"; }
-printf 'fleet block written to %s (%s repos, %s adopted)\n' "$FILE" "$n_all" "$n_adopted"
+printf 'fleet block written to %s (%s repositories, %s adopted)\n' "$FILE" "$n_all" "$n_adopted"
