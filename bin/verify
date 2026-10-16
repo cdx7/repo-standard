@@ -827,6 +827,10 @@ elif [ "$ARCH" = vendor-derived ]; then
   if [ -f docs/official/DEVIATIONS.md ]; then pass "docs/official/DEVIATIONS.md present"
   elif [ -f DEVIATIONS.md ]; then warn "vendor-derived: DEVIATIONS.md is at the root — its slot is docs/official/ since 0.3.26 (D47): git mv it there and leave a pointer where a build or a reader expects it"
   else warn "vendor-derived: docs/official/DEVIATIONS.md missing"; fi
+  # The questions for the vendor (F18), beside the register: present or not, nothing more —
+  # no tool reads the file's form, so its content is never judged here.
+  if [ -f docs/official/VENDOR-QUESTIONS.md ]; then pass "docs/official/VENDOR-QUESTIONS.md present"
+  else warn "vendor-derived: docs/official/VENDOR-QUESTIONS.md missing — the questions for the vendor live there; move a list kept elsewhere, or run init on this repo to write the skeleton (it adds only what is missing)"; fi
   # The register's tool (F17, 0.4.0), the same way the tracker's is judged: the repo's own
   # copy first, else the standard's canonical one with a note saying so (B78's rule).
   REG=() REGNOTE=""
@@ -873,8 +877,8 @@ elif [ "$ARCH" = vendor-derived ]; then
     fi
   fi
 elif [ "$ARCH" = authored ]; then
-  if [ -d docs/reference ] || [ -f docs/official/DEVIATIONS.md ] || [ -f DEVIATIONS.md ] || [ -e bin/register ]; then
-    warn "authored repo has vendor-derived slots (docs/reference, DEVIATIONS.md or bin/register) — archetype mismatch?"
+  if [ -d docs/reference ] || [ -f docs/official/DEVIATIONS.md ] || [ -f DEVIATIONS.md ] || [ -f docs/official/VENDOR-QUESTIONS.md ] || [ -e bin/register ]; then
+    warn "authored repo has vendor-derived slots (docs/reference, DEVIATIONS.md, VENDOR-QUESTIONS.md or bin/register) — archetype mismatch?"
   else pass "no vendor-derived slots (correct for authored)"; fi
 else skip "archetype unknown (pass --authored/--vendor-derived or run init to stamp)"; fi
 

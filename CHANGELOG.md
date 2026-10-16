@@ -2,6 +2,43 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.7.0 — 2026-10-16
+A vendor-derived repo gets a home for its questions to the vendor, beside the register, and the
+standard now says what to do when the vendor sends a new version of its documents.
+
+- **`docs/official/VENDOR-QUESTIONS.md`:** a new slot of the vendor-derived archetype, authored
+  like the register and kept beside it. One entry per question: a `## VQ07. Title` heading
+  (IDs from `VQ01`, never reused), one header line (`*Status:*`, `*Source:*` with the
+  document's version, `*Concerns:*`, `*Interim:*`), then its text. A question is cited by its
+  ID, `VQ07`. Its status is *open*, then *sent*, *answered*, *settled* or *withdrawn*, each
+  with its date. An answer is applied in the same piece of work to the register entries it
+  concerns, and an entry that exists only as an interim workaround says so and cites the
+  question. What is sent together is a batch, listed in the file and tracked by one
+  Documentation row. No tool reads the file.
+- **A new drop:** STANDARD.md now states the re-read for both: when the vendor sends a new
+  version of its documents, every register entry and every unanswered question is re-read
+  against it.
+- **`init --vendor-derived`:** writes the file's skeleton, with the workflow in its intro, only
+  when absent. Run on an already adopted repo, it adds only what is missing.
+- **`verify`:** warns when a vendor-derived repo has no `docs/official/VENDOR-QUESTIONS.md`, and
+  counts the file as a vendor slot when it finds one in an authored repo. It checks presence
+  only.
+- **Docs:** STANDARD.md (the archetype slots, The register, a new section, the toolkit),
+  `REPO-STANDARD.md` (the file among the fixed names), the transfer prompt (section 1), and
+  the notice's spec.
+- **Upgrading:** `sync` brings the new `REPO-STANDARD.md` to every adopted repo, authored ones
+  included; nothing else changes for an authored repo, and no page is re-rendered. In a
+  vendor-derived repo `verify` then warns until the questions file exists: move a list of
+  questions kept elsewhere to that path (with its IDs in the `VQ` form and its citations
+  rewritten), or run `init` on the repo for the skeleton. Until the sync, `verify` reports
+  that 0.7.0 is available.
+
+Tested with a new suite, `tests/vendor-questions.sh` (40 checks, 23 of which fail on 0.6.1;
+the others check for absence or a refusal), and the release's other suites (113, 35, 48, 97,
+73, 68 and 58 checks), each passing.
+
+The README's State section says 0.7.0.
+
 ## 0.6.1 — 2026-10-15
 A fix for 0.6.0: one of `bin/register`'s own comments read as a citation.
 

@@ -16,7 +16,8 @@ versus appending to STATUS, relocations, the reason for `git mv`, the fold heade
 the ID width, the single-handoff-day rename, one root `z-deprecated/`, and `docs/official/`
 as a home rather than a mandate), and again 2026-10-01 (F17, 0.4.0: the register's checkable
 form, `bin/register`, and the guard's second check), and again 2026-10-02 (0.5.0: the
-`REPO-STANDARD.md` notice in every repo).
+`REPO-STANDARD.md` notice in every repo), and again 2026-10-16 (F18, 0.7.0: the questions for
+the vendor, and the re-read on a new vendor drop).
 The hook scripts are deliberately **no longer embedded**:
 two copies already drifted apart; a third copy pasted into prompts drifts worst of all. The
 prompt now describes each hook's contract and says where the canonical script lives.
@@ -41,11 +42,12 @@ installs canonical hooks this prompt only describes.
 Every repo is exactly one of two kinds; name it up front (the standard records it in a
 `.repo-standard-version` stamp at the root):
 - AUTHORED — the code IS the deliverable; docs describe code that exists.
-- VENDOR-DERIVED — external docs are the input; code is generated to satisfy them. Two extra
+- VENDOR-DERIVED — external docs are the input; code is generated to satisfy them. Three extra
   homes exist only here: `docs/reference/` (received, authoritative vendor material you did
-  NOT author) and `docs/official/DEVIATIONS.md`, the register: where the implementation
-  diverges from the reference, and why — the single most valuable artifact in such a repo.
-  You authored it, so it lives with the end-user docs and opens with that home's status line.
+  NOT author), the questions for the vendor (below), and `docs/official/DEVIATIONS.md`, the
+  register: where the implementation diverges from the reference, and why — the single most
+  valuable artifact in such a repo. You authored it, so it lives with the end-user docs and
+  opens with that home's status line.
   The register has a checkable form, kept by the standard's `bin/register` tool:
   - a `## Types` table and a `## Sources` table (key, document, version, date, and a path
     relative to the register), kept by hand;
@@ -56,7 +58,18 @@ Every repo is exactly one of two kinds; name it up front (the standard records i
     `DEVIATIONS.html` beside it, both generated (`bin/register render`), never hand-edited.
   Cite an entry as `register N`; a closed entry keeps its number. Without the tool, keep the
   tables, headings and header lines by hand and leave the generated parts out.
-An authored repo has neither home, and that absence is itself a signal.
+  `docs/official/VENDOR-QUESTIONS.md`, beside the register, holds the questions for the
+  vendor: one `## VQ07. Title` heading per question (IDs from VQ01, zero-padded, never
+  reused), ONE header line — `*Status:* open | sent | answered | settled | withdrawn (each but
+  open with its date) · *Source:* <key> <version> <location> · *Concerns:* register N, or
+  none · *Interim:* where the workaround is recorded, or none` — then its text. Cite one as
+  `VQ07`. An answer is applied in the same piece of work to the register entries it
+  concerns; an entry that exists only as an interim says so and cites the question. What is
+  sent together is a batch, listed in the file and tracked by one Documentation row (open
+  until sent, blocked while the vendor answers, done when every question has an outcome).
+  When the vendor sends a new version of its documents, re-read every register entry and
+  every unanswered question against it.
+An authored repo has none of these homes, and that absence is itself a signal.
 
 ────────────────────────────────────────
 2) ROOT README — THE FRONT DOOR

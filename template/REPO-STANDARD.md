@@ -57,6 +57,8 @@ The hooks and tools find these by name, from the repo root:
 - `docs/reference/` — vendor-derived repos only: the vendor's documents, as received.
 - `docs/official/DEVIATIONS.md` — vendor-derived repos only: the register of where this repo
   departs from those documents, and why.
+- `docs/official/VENDOR-QUESTIONS.md` — vendor-derived repos only: the questions for the
+  vendor (`VQ01` onward), what was sent, and what came back.
 - `.repo-standard-version` — which version of the standard this repo follows.
 
 ## Generated: never edit by hand

@@ -53,8 +53,9 @@ maintainer's review.
 - **What each managed file does,** one line each.
 - **Fixed names: do not rename or restructure.** `docs/official/`, `docs/AI/`,
   `docs/AI/session-handoffs/`, `docs/dev-notes/` (`STATUS`, `tracker.md`, `tracker.html`),
-  `docs/reference/` and `docs/official/DEVIATIONS.md` in a vendor-derived repo, and `bin/` at
-  the root. The hooks and tools find them by these names.
+  `docs/reference/` and `docs/official/DEVIATIONS.md` in a vendor-derived repo (and, from
+  0.7.0, `docs/official/VENDOR-QUESTIONS.md`), and `bin/` at the root. The hooks and tools find
+  them by these names.
 - **Yours to write:** the README, `CLAUDE.md`, `STATUS`, the tracker's rows (through
   `bin/track`), the register's entries, everything in `docs/`. The lines the standard needs in
   `.gitignore` and `.gitattributes` stay; the rest of those files is yours.

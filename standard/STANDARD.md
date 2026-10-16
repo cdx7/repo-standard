@@ -16,9 +16,9 @@ still believe, delete the rule — don't keep it out of habit.
 
 ## Two archetypes
 
-Every repo is exactly one of two kinds. The **spine** (below) is identical for both; two
-optional **slots** appear only for the vendor-derived kind. The archetype is chosen at `init`
-time and recorded in `.repo-standard-version`.
+Every repo is exactly one of two kinds. The **spine** (below) is identical for both; a few
+**slots** appear only for the vendor-derived kind. The archetype is chosen at `init` time and
+recorded in `.repo-standard-version`.
 
 - **Authored solution** — the code *is* the deliverable. Docs describe code that exists.
   *Example: a tool or service whose source is the product — purpose-built code developed as a
@@ -30,7 +30,8 @@ time and recorded in `.repo-standard-version`.
 
 Naming the archetype up front sets expectations: a reader of an authored repo looks for the
 solution in the code; a reader of a vendor-derived repo looks for the source-of-truth in
-`docs/reference/` and the divergences in `docs/official/DEVIATIONS.md`.
+`docs/reference/`, the divergences in `docs/official/DEVIATIONS.md`, and what is still to be
+asked of the vendor in `docs/official/VENDOR-QUESTIONS.md`.
 
 ---
 
@@ -353,6 +354,9 @@ out of the way but recoverable.
   tell you. It is documentation *you* authored about the vendor's material, so it lives in
   `docs/official/` under that home's rules, status line included; a pointer may sit wherever a
   build or a reader expects the register, never a second copy. <!-- (D47) -->
+- **`docs/official/VENDOR-QUESTIONS.md`** — the questions for the vendor: what this repo needs
+  to ask about `docs/reference/`, what was sent, and what came back (below). Authored like the
+  register and kept beside it, under the same home's rules. <!-- (F18) -->
 - **`bin/register`** — the register's tool (below). It is machinery, like `bin/track`, but
   only this archetype gets it.
 
@@ -376,6 +380,12 @@ them.
 Code and docs cite an entry as `register N`. A closed entry stays in the file and keeps its
 number, as the tracker keeps done rows.
 
+**A new drop.** When the vendor sends a new version of its documents, every entry is re-read
+against it: the Sources table takes the new versions, an entry that stands names its new
+anchor (with a dated "Re-read …" note where something moved), and one the new documents
+settle is amended or closed. The questions for the vendor are re-read in the same pass
+(below). <!-- (F18) -->
+
 **Why.** A register grows long (the first one adopted: 37 entries, 1,630 lines), its hand-kept
 summary table drifted from the entries, and its citations took five forms. The tool keeps the
 mechanical parts honest — the structure, the summary, where each entry is cited — and the
@@ -396,6 +406,51 @@ reasoning stays hand-written.
   `map` refuse, and `verify` warns.
 - Full behavior: `../docs/AI/design/register-script-spec.md`.
 
+### Questions for the vendor
+
+**What.** `VENDOR-QUESTIONS.md` holds one entry per question: a `## VQ07. Title` heading (IDs
+from `VQ01`, zero-padded to two digits, never reused), one header line, then its text:
+`*Status:* open | sent YYYY-MM-DD | answered YYYY-MM-DD | settled YYYY-MM-DD | withdrawn YYYY-MM-DD · *Source:* <key> <version> <location>; … · *Concerns:* register N, … or none · *Interim:* where it is recorded, or none`.
+
+- **Status:** *open* until sent. *Settled* means our own evidence or a newer document answered
+  it, with nothing to send or no reply needed.
+- **Source** carries the document's version: the register's Sources table holds only each
+  document's current version, so a bare key would move on with the next drop.
+- **Concerns** names the register entries the answer would change; an entry that waits on the
+  vendor cites the question.
+- **Interim** is what the repo does until the answer, given as where that is recorded
+  (`register N`, a script, a tracker row), or `none`. A register entry that holds an interim
+  says so in its text, citing the question ("an interim, until VQ07 is answered"), so the
+  register shows which of its divergences are provisional.
+- **An answer** is recorded under its question, dated, with where it was applied, and is
+  applied in the same piece of work: each entry it concerns is amended (its Updated gains the
+  date) or closed, and the interim is kept as the outcome, changed or removed.
+- **Batches.** What is sent together is a batch, listed in the file (its IDs, the drop it was
+  asked against, the date sent, its tracker row) and tracked by one Documentation row:
+  `open` until sent, `blocked` while the vendor answers, `done` when every question in it
+  has an outcome. Questions written after a batch is sent go into the next.
+- **A new drop:** every question not yet answered is re-read against it, as the register's
+  entries are; one the new documents settle becomes *settled*, with the document and page.
+
+Cite a question by its ID, `VQ07`, in prose, code comments and commit messages: one token,
+which no line break can split, and no other numbering shares it.
+
+**Why.** A vendor-derived repo collects questions for its vendor as it goes: contradictions
+between documents, steps that do not work as printed, choices the documents leave open.
+Without one home they scatter. In the first vendor-derived repo they grew in the register,
+an audit's list and the handoffs, under three numbering schemes, one number naming two
+different questions; none was sent and nothing tracked sending them, and an answer had no
+path back to the entry waiting on it. A workaround that nothing marks as provisional quietly
+becomes permanent.
+
+**Tooling.**
+
+- `init --vendor-derived` writes the file's skeleton, with this workflow in its intro, only
+  when absent.
+- `verify` warns when a vendor-derived repo has none, and counts the file as a vendor slot in
+  an authored repo. Nothing reads its form or its citations: a memo, not a mechanism, until
+  drift says otherwise. <!-- (F18) -->
+
 ---
 
 ## The toolkit (`../bin/`)
@@ -413,8 +468,10 @@ Stamps `template/` into a repo, idempotently content-wise (never overwrites; rep
   `verify` immediately.
 - It installs `REPO-STANDARD.md`, the standard's notice (section 3), in every repo.
 - In a vendor-derived repo it also installs `bin/register`, writes the register skeleton in its
-  entry form (empty Types and Sources tables, the marker pair, no entries), and renders
-  `DEVIATIONS.html` on the same only-when-absent terms.
+  entry form (empty Types and Sources tables, the marker pair, no entries) and the skeleton of
+  `VENDOR-QUESTIONS.md`, and renders `DEVIATIONS.html` on the same only-when-absent terms. Run
+  on an adopted repo, it adds only what is missing: the way to add the questions file to a
+  repo adopted before 0.7.0 that keeps none.
 - The one exception to never-overwrites: an existing `.repo-standard-version` whose archetype
   disagrees with the flag you passed (or reads `(unknown)`) is **corrected** — the explicit
   flag is the record of truth, and only `init` knows it.
@@ -435,7 +492,7 @@ Read-only conformance lint over the *mechanical* rules above — the ones a scri
 - In a vendor-derived repo it checks `bin/register` and runs `register check` and
   `register map --check`. A stale summary or `DEVIATIONS.html` is a `FAIL`, as a stale
   `tracker.html` is; everything else they find is a `WARN`, a register not yet migrated
-  included.
+  included. It warns when `docs/official/VENDOR-QUESTIONS.md` is missing, and never reads it.
 - **Managed files.** The repo's stamp is compared with the `VERSION` of the standard checkout
   running `verify`: an older stamp warns that a newer version is available (run `sync`), a
   newer one that the checkout is behind (`git pull` it). Every managed file but

@@ -3,8 +3,10 @@
 #   init <target-dir> --authored | --vendor-derived [--name NAME] [--force] [--allow-dirty]
 # The target directory must already EXIST — init dresses a repo, it does not create one.
 # Stamps template/ into <target-dir>; reports add/over/skip. Authored content (README,
-# STATUS, tracker, DEVIATIONS, .gitignore) is NEVER overwritten — not even with --force.
-# --vendor-derived also installs bin/register, the register's tool, and its skeleton.
+# STATUS, tracker, DEVIATIONS, VENDOR-QUESTIONS, .gitignore) is NEVER overwritten — not even
+# with --force.
+# --vendor-derived also installs bin/register, the register's tool, and its skeleton, and the
+# skeleton of the questions for the vendor.
 # --force is scoped to the shared machinery only, and prints 'over' for each overwrite.
 # A git-repo target must be CLEAN (the migration baseline) — --allow-dirty overrides.
 # Does NOT author content, git init, or commit — those stay yours.
@@ -75,7 +77,7 @@ sect_of(){
     README.md)                              printf '[1] front door' ;;
     CLAUDE.md)                              printf '[3] CLAUDE.md' ;;
     REPO-STANDARD.md)                       printf '[3] notice' ;;
-    docs/official/DEVIATIONS.*|bin/register) printf '[V] vendor slot' ;;
+    docs/official/DEVIATIONS.*|docs/official/VENDOR-QUESTIONS.md|bin/register) printf '[V] vendor slot' ;;
     docs/official/*|docs/dev-notes/STATUS)  printf '[2] docs homes' ;;
     .claude/settings.json|.claude/hooks/*)  printf '[3] hooks' ;;
     .gitignore|.gitignore.skel)             printf '[3] gitignore' ;;
@@ -135,7 +137,7 @@ if [ -z "$ALLOW_DIRTY" ] && git -C "$TARGET" rev-parse --is-inside-work-tree >/d
     while IFS= read -r line; do
       f="${line:3}"; f="${f#\"}"; f="${f%\"}"; case "$f" in *" -> "*) f="${f##* -> }" ;; esac
       case "$f" in
-        .claude/settings.json|.claude/hooks/stop-handoff-check.sh|.claude/hooks/session-start-rollover-check.sh|.githooks/pre-commit|bin/track|bin/register|.gitignore|.gitattributes|README.md|CLAUDE.md|REPO-STANDARD.md|docs/dev-notes/STATUS|docs/dev-notes/tracker.md|docs/dev-notes/tracker.html|docs/official/.gitkeep|docs/AI/session-handoffs/.gitkeep|docs/reference/.gitkeep|docs/official/DEVIATIONS.md|docs/official/DEVIATIONS.html|.repo-standard-version) ;;
+        .claude/settings.json|.claude/hooks/stop-handoff-check.sh|.claude/hooks/session-start-rollover-check.sh|.githooks/pre-commit|bin/track|bin/register|.gitignore|.gitattributes|README.md|CLAUDE.md|REPO-STANDARD.md|docs/dev-notes/STATUS|docs/dev-notes/tracker.md|docs/dev-notes/tracker.html|docs/official/.gitkeep|docs/AI/session-handoffs/.gitkeep|docs/reference/.gitkeep|docs/official/DEVIATIONS.md|docs/official/DEVIATIONS.html|docs/official/VENDOR-QUESTIONS.md|.repo-standard-version) ;;
         *) scaffold_only=0 ;;
       esac
     done < <(git -C "$TARGET" status --porcelain -uall 2>/dev/null)
@@ -694,6 +696,41 @@ Cite an entry as \`register N\`. \`bin/register render\` keeps the summary and
 EOF
     then printf '  add   %-16s %s\n' "$(sect_of "docs/official/DEVIATIONS.md")" "docs/official/DEVIATIONS.md"; added=$((added+1))
     else printf '  FAIL  %-16s %s (write failed — permissions/disk?)\n' "$(sect_of "docs/official/DEVIATIONS.md")" "docs/official/DEVIATIONS.md"; wfail=$((wfail+1)); fi
+  fi
+  # The questions for the vendor (F18): beside the register, authored like it, so the same
+  # status line and the same never-overwrite rule. No tool reads the file, so its workflow is
+  # written into it: the file is what travels with each repo.
+  if absent "$TARGET/docs/official/VENDOR-QUESTIONS.md"; then
+    if cat 2>/dev/null >"$TARGET/docs/official/VENDOR-QUESTIONS.md" <<EOF
+> **Draft.** Skeleton stamped by repo-standard \`init\` on $(date +%Y-%m-%d); add the first question, then change this line to **Current** with that day's date.
+
+# Questions for the vendor
+
+What this repo needs to ask the vendor about the documents in \`docs/reference/\`, and what
+came back. Each question is a \`## VQnn. Title\` heading (\`VQ01\` onward; an ID is never
+reused), then one header line, then its text:
+\`*Status:* open · *Source:* <key> <version> <location> · *Concerns:* register N, or none · *Interim:* where it is recorded, or none\`.
+Cite a question by its ID: \`VQ07\`.
+
+- **Status:** *open* until sent; then *sent*, *answered*, *settled* (our own evidence or a
+  newer document answered it) or *withdrawn*, each with its date.
+- **Source:** the document's key from the register's Sources table, with its version, since
+  that table holds only the current one.
+- **Concerns:** the register entries the answer would change. **Interim:** what this repo
+  does until the answer, as where that is recorded (\`register N\`, a script, a tracker row);
+  a register entry that holds an interim says so and cites the question.
+- **An answer** is recorded under its question, dated, and applied in the same piece of
+  work: each entry it concerns is amended or closed. **A new drop** of the vendor's
+  documents: every question not yet answered is re-read against it.
+
+## Batches
+
+One line per batch sent together: its IDs, the drop it was asked against, the date sent, and
+its tracker row (*open* until sent, *blocked* while the vendor answers, *done* when every
+question in it has an outcome).
+EOF
+    then printf '  add   %-16s %s\n' "$(sect_of "docs/official/VENDOR-QUESTIONS.md")" "docs/official/VENDOR-QUESTIONS.md"; added=$((added+1))
+    else printf '  FAIL  %-16s %s (write failed — permissions/disk?)\n' "$(sect_of "docs/official/VENDOR-QUESTIONS.md")" "docs/official/VENDOR-QUESTIONS.md"; wfail=$((wfail+1)); fi
   fi
 fi
 
