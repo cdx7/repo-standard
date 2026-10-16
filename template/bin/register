@@ -958,9 +958,11 @@ cmd_history() {
 
   # Commits whose messages name it, in the five forms that name the register, each matched
   # whole: never inside a longer number, and not where the number runs on into a date or a
-  # version, as in map. In 'register 20/22', only 20 is named, as in map. Each message is
-  # read with its lines joined, since a wrapped message often breaks a citation in two
-  # ("register entries" / "32"); git log --grep matches one line at a time.
+  # version, as in map; in a list of numbers after one citation, only the first is named.
+  # Each message is read with its lines joined, since a wrapped message often breaks a
+  # citation in two, its word on one line and its number on the next; git log --grep
+  # matches one line at a time. (This file is a live file in every vendor-derived repo, so
+  # its own comments must never read as a citation: tests/register-map.sh scans it.)
   local commits nc=0
   commits="$(git -C "$ROOT" log --reverse --format='%cs%x1f%h%x1f%s%x1f%B%x1e' 2>/dev/null | LC_ALL=C awk -v RS='\036' -F'\037' -v n="$HN" '
       BEGIN{ re="[^a-z0-9_](register([ \t]+entr(y|ies))?[ \t]+|deviations(\\.md)?[ \t]*(§[ \t]*|#))0*" n "([^0-9.-]|[.-]([^0-9]|$)|$)" }

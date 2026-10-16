@@ -2,6 +2,27 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.6.1 — 2026-10-15
+A fix for 0.6.0: one of `bin/register`'s own comments read as a citation.
+
+- **`bin/register`:** a comment that 0.6.0 added for `register history` had the word
+  "register" followed by a number, which `register map` counts as a citation. `bin/register`
+  is one of a vendor-derived repo's live files, so every such repo showed a citation of entry
+  20 that no one wrote: an error ("no such entry") in a register with fewer than 20 entries,
+  and in a longer one a false citation that also left `DEVIATIONS.html`'s citations behind the
+  files until the next render. The comment is reworded. No code changed.
+- **Upgrading:** in a vendor-derived repo, `sync` brings the corrected `bin/register`; an
+  authored repo already on 0.6.0 receives only the new stamp. A vendor-derived repo that
+  rendered its register under 0.6.0 should run `bin/register render` after the sync, so its
+  page drops the false citation. Until then `verify` reports that 0.6.1 is available.
+
+Tested with the register map suite, which now scans each of the standard's managed files and
+expects no citation in any (97 checks; on 0.6.0's `bin/register` the new case fails, on
+0.5.3's it passes), and the release's other suites (113, 35, 48, 73, 68 and 58 checks), each
+passing.
+
+The README's State section says 0.6.1.
+
 ## 0.6.0 — 2026-10-15
 A tracker item can now carry more than a one-line Description, and both tools can show an
 item's history, read from git. The two features share one minor release because both change
