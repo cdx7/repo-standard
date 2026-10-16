@@ -256,6 +256,10 @@ Documentation / Testing**.
 - IDs and dates are **never hand-assigned** — they're maintained by `track`.
 - Rows are **never deleted**: work that will not happen is retired in place with `dropped` /
   `cnr`, so every ID ever issued keeps resolving.
+- An item that needs more than a one-line Description gets a section of its own, under one
+  `## Details` heading after the four tables: `### <ID> — <Name>` (the row's Name exactly),
+  then free text, written by hand. The Description stays a one-line summary. `track render`
+  shows the section under its row and refuses one it cannot match to exactly one row.
 - Backing that up, `track add` maintains a `docs/dev-notes/tracker-hwm` sidecar recording the
   highest ID ever issued per prefix, so once it exists a hand-pruned top-level row cannot cause
   its number to be reissued. The sidecar is **self-installing**: it is first written by the
@@ -275,6 +279,9 @@ because a static table stops being useful the moment it has more than a screen o
 
 - `track add` / `track set-status` mutate the file and auto-render the view.
 - `track render --check` detects a stale view.
+- `track history <ID>` prints an item's history from git: each version of its row and detail
+  section, the commits that name it, and the files that cite it. Nothing is recorded; git
+  already holds the record.
 - The `pre-commit` guard blocks a commit whose view is out of date.
 - Full behavior: `../docs/AI/design/track-script-spec.md`.
 
@@ -381,6 +388,8 @@ reasoning stays hand-written.
 - `bin/register map` lists where each entry is cited, in the files that describe the build as
   it is now (`--all` for every tracked file). A citation of a missing entry is an error, of a
   closed one a warning.
+- `bin/register history N` prints an entry's history from git: each version of its section,
+  the commits that name it, and the files that cite it (as `map --entry N --all`).
 - The commit guard checks the staged register (section 6), and `verify` runs `check` and
   `map --check`.
 - A register without the marker pair is *not yet migrated*: `check` passes it, `render` and

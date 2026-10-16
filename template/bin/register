@@ -9,6 +9,7 @@
 #   register map [--entry N | --file PATH] [--all] [--check]
 #                      # list where `register N` is cited; --check exits 1 on a citation
 #                      # of an entry that does not exist
+#   register history <N>   # entry N's history, read from git (versions, commits, citations)
 # The prose stays hand-written: the tool reads the types table, the sources table, the
 # `## N. Title` entry headings and the header line under each, and generates only the
 # summary block and the page. Every byte outside the markers is kept.
@@ -826,6 +827,168 @@ cmd_check() {
   printf 'register: valid and up to date  (%d entries, %d types, %d sources)\n' "${#ENTRIES_R[@]}" "${#TYPES_R[@]}" "${#SOURCES_R[@]}"
 }
 
+# ── history ───────────────────────────────────────────────────────────────────────────
+# One entry's history, read from git on demand (spec § 2): the committed versions in which
+# its section changed, the commits whose messages name it, and the files that cite it.
+# Nothing is recorded: git already holds the record. Read-only — no lock, no render, no
+# write. The git walk repeats track's rather than sharing it, for the reason the page
+# shell is (spec § 3). It needs no markers: a register's history predates them.
+# HISTSEC: stdin is one version of the register → records for entry ENVIRON["HN"]:
+#   X                                       the version has a numbered entry heading
+#   T title                                 the entry's heading title
+#   R header                                its header paragraph, wrapped lines joined
+#   F type status original updated source   the header's fields, when they parse
+#   B text                                  the rest of the section, newlines as 0x02
+# The section runs from '## N. ' to the next '# ' or '## ' heading, fence-aware as the
+# parser is, so a quoted example heading neither opens nor closes it.
+read -r -d '' HISTSEC <<'AWK' || true
+function trim(x){ gsub(/^[ \t]+|[ \t]+$/,"",x); return x }
+function add(l,fenced){
+  if(st==0){ if(l ~ /^[ \t]*$/ && !fenced) return
+             if(!fenced && l ~ /^\*Type:\*/){ st=1; hdr=trim(l); return }
+             st=2 }
+  else if(st==1){ if(fenced || l ~ /^[ \t]*$/){ st=2; if(!fenced) return } else { hdr=hdr " " trim(l); return } }
+  body=body l "\002"
+}
+function fields(txt,  lbl,f,rest,pos){
+  split("Type Status Original Updated Source",lbl," ")
+  rest=txt
+  for(f=1;f<=5;f++){
+    rest=trim(rest)
+    if(index(rest,"*" lbl[f] ":*")!=1) return 0
+    rest=substr(rest,length("*" lbl[f] ":*")+1)
+    if(f<5){ pos=index(rest," · "); if(!pos) return 0; V[f]=trim(substr(rest,1,pos-1)); rest=substr(rest,pos+length(" · ")) }
+    else V[f]=trim(rest)
+  }
+  return 1
+}
+BEGIN{ want=ENVIRON["HN"]+0 }
+{ sub(/\r$/,"") }
+/^ {0,3}(```|~~~)/ { t=($0 ~ /^ {0,3}~~~/)?"t":"b"; if(fc=="")fc=t; else if(fc==t)fc=""; if(on) add($0,1); next }
+fc!="" { if(on) add($0,1); next }
+/^##? / { on=0
+  if($0 ~ /^## [1-9][0-9]*\. +[^ \t]/){ x=1; n=$0; sub(/^## /,"",n); sub(/\..*$/,"",n)
+    if(n+0==want && !got){ got=1; on=1; st=0; ti=$0; sub(/^## [0-9]+\. +/,"",ti); ti=trim(ti) } }
+  next }
+on { add($0,0) }
+END{
+  if(x) print "X"
+  if(!got) exit
+  print "T\037" ti
+  if(hdr!=""){ print "R\037" hdr; if(fields(hdr)) print "F\037" V[1] "\037" V[2] "\037" V[3] "\037" V[4] "\037" V[5] }
+  sub(/^\002+/,"",body); sub(/\002+$/,"",body); print "B\037" body
+}
+AWK
+hist_read(){  # $1 = HISTSEC's records → the E_* variables of cmd_history
+  local k a b c d e
+  E_X=0 E_ON=0 E_T="" E_R="" E_FOK=0 E_TY="" E_ST="" E_OG="" E_UP="" E_SO="" E_B=""
+  while IFS=$'\037' read -r k a b c d e; do
+    case "$k" in
+      X) E_X=1 ;; T) E_ON=1 E_T=$a ;; R) E_R=$a ;; B) E_B=$a ;;
+      F) E_FOK=1 E_TY=$a E_ST=$b E_OG=$c E_UP=$d E_SO=$e ;;
+    esac
+  done <<<"$1"
+}
+hist_keep(){ P_ON=$E_ON P_T=$E_T P_R=$E_R P_FOK=$E_FOK P_TY=$E_TY P_ST=$E_ST P_OG=$E_OG P_UP=$E_UP P_SO=$E_SO P_B=$E_B; }
+hist_short(){ local s=$1; [ "${#s}" -le "$2" ] || s="${s:0:$(($2-1))}…"; printf '%s' "$s"; }
+hist_lines(){ [ -n "$1" ] || { echo 0; return; }; local t="${1//[!$'\002']/}"; echo $(( ${#t} + 1 )); }
+hist_hdr(){  # the current header, for a line: its fields, or the raw text when they do not parse
+  if [ "$E_FOK" = 1 ]; then printf '%s · %s · %s · %s · %s' "$E_TY" "$E_ST" "$E_OG" "$(hist_short "$E_UP" 40)" "$(hist_short "$E_SO" 40)"
+  else hist_short "$E_R" 80; fi
+}
+# What changed from the previous version (P_*) to this one (E_*), as one ' · '-joined phrase.
+hist_delta(){
+  local out=() n0
+  if [ "$P_ON" = 0 ] && [ "$E_ON" = 1 ]; then
+    if [ "$H_SEEN" = 1 ]; then out+=("entry back")
+    elif [ "$H_NUMBERED" = 1 ]; then out+=("first appears as entry $HN")
+    else out+=("first appears as entry $HN, in the file's first numbered version (the entry may be older)"); fi
+    [ -z "$E_R" ] || out+=("header: $(hist_hdr)")
+  elif [ "$P_ON" = 1 ] && [ "$E_ON" = 0 ]; then
+    out+=("entry removed")
+  elif [ "$E_ON" = 1 ]; then
+    [ "$P_B" = "$E_B" ] || out+=("text changed ($(hist_lines "$P_B") → $(hist_lines "$E_B") lines)")
+    [ "$P_T" = "$E_T" ] || out+=("title → \"$(hist_short "$E_T" 60)\"")
+    if [ "$P_R" != "$E_R" ]; then
+      if [ -z "$P_R" ]; then out+=("header added: $(hist_hdr)")
+      elif [ -z "$E_R" ]; then out+=("header removed")
+      elif [ "$P_FOK" = 1 ] && [ "$E_FOK" = 1 ]; then
+        n0=${#out[@]}
+        [ "$P_TY" = "$E_TY" ] || out+=("Type $P_TY → $E_TY")
+        [ "$P_ST" = "$E_ST" ] || out+=("Status $P_ST → $E_ST")
+        [ "$P_OG" = "$E_OG" ] || out+=("Original $P_OG → $E_OG")
+        [ "$P_UP" = "$E_UP" ] || out+=("Updated $(hist_short "$P_UP" 40) → $(hist_short "$E_UP" 40)")
+        [ "$P_SO" = "$E_SO" ] || out+=("Source → \"$(hist_short "$E_SO" 60)\"")
+        [ "${#out[@]}" -gt "$n0" ] || out+=("header changed")   # the same fields, spaced differently
+      else out+=("header changed"); fi
+    fi
+  fi
+  [ "${#out[@]}" -gt 0 ] || return 0
+  local IFS=$'\037'; local j="${out[*]}"; printf '%s' "${j//$'\037'/ · }"
+}
+cmd_history() {
+  [ $# -eq 1 ] || err "usage: register history <N>"
+  local HN="$1"
+  case "$HN" in ''|*[!0-9]*) err "history takes an entry number, a whole number, not '$HN'" ;; esac
+  HN="${HN#"${HN%%[!0]*}"}"
+  [ -n "$HN" ] || err "entry numbers start at 1"
+  repo_root || err "history reads git, and $FILE is not inside a git work tree"
+  local shallow=""; [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = true ] && shallow=1
+  local E_X E_ON E_T E_R E_FOK E_TY E_ST E_OG E_UP E_SO E_B
+  local P_ON=0 P_T="" P_R="" P_FOK=0 P_TY="" P_ST="" P_OG="" P_UP="" P_SO="" P_B=""
+  local H_SEEN=0 H_NUMBERED=0 lines=() nv=0 lastc="" lastd="" c d p what
+
+  # Versions: every commit that touched the file, oldest first. --follow keeps the history
+  # across a rename, and git cannot combine it with --reverse, hence tac.
+  while IFS=' ' read -r c d p; do
+    hist_read "$(git -C "$ROOT" show "$c:$p" 2>/dev/null | HN="$HN" LC_ALL=C awk "$HISTSEC" || true)"
+    what="$(hist_delta)"
+    if [ -n "$what" ]; then lines+=("  $d  $c  $what"); nv=$((nv+1)); fi
+    if [ "$E_ON" = 1 ]; then H_SEEN=1 lastc=$c lastd=$d; fi
+    if [ "$E_X" = 1 ]; then H_NUMBERED=1; fi
+    hist_keep
+  done < <(git -C "$ROOT" log --follow --format='@@%h %cs' --name-only -- "$REGREL" 2>/dev/null \
+             | awk '/^@@/{c=substr($0,3); next} NF && c!=""{print c, $0; c=""}' | tac)
+
+  # The working copy: an 'uncommitted' last line when it differs from the last commit.
+  hist_read "$(HN="$HN" LC_ALL=C awk "$HISTSEC" < "$FILE" || true)"
+  what="$(hist_delta)"
+  [ -z "$what" ] || lines+=("  uncommitted          $what")
+  [ "$E_ON" = 1 ] || [ "$H_SEEN" = 1 ] || err "entry $HN has no '## $HN.' heading, now or in the history of $REGREL"
+
+  # Commits whose messages name it, in the five forms that name the register, each matched
+  # whole: never inside a longer number, and not where the number runs on into a date or a
+  # version, as in map. In 'register 20/22', only 20 is named, as in map. Each message is
+  # read with its lines joined, since a wrapped message often breaks a citation in two
+  # ("register entries" / "32"); git log --grep matches one line at a time.
+  local commits nc=0
+  commits="$(git -C "$ROOT" log --reverse --format='%cs%x1f%h%x1f%s%x1f%B%x1e' 2>/dev/null | LC_ALL=C awk -v RS='\036' -F'\037' -v n="$HN" '
+      BEGIN{ re="[^a-z0-9_](register([ \t]+entr(y|ies))?[ \t]+|deviations(\\.md)?[ \t]*(§[ \t]*|#))0*" n "([^0-9.-]|[.-]([^0-9]|$)|$)" }
+      NF>=4 { d=$1; sub(/^[\r\n]+/,"",d); m=" " tolower($4); gsub(/[\r\n]+/," ",m)
+              if(m ~ re) print d "  " $2 "  " $3 }' || true)"
+  [ -z "$commits" ] || nc=$(printf '%s\n' "$commits" | wc -l)
+
+  # The files that cite it: what `register map --entry N --all` lists.
+  collect 1 ""
+  local cites; cites="$(printf '%s\n' "$CREC" | LC_ALL=C awk -F'\037' -v n="$HN" '
+      $1=="C" && $4==n { if(!($2 in L)){ o[++k]=$2; L[$2]=$3 } else L[$2]=L[$2] ", " $3 }
+      END{ for(i=1;i<=k;i++) printf "  %s: %s\n", o[i], L[o[i]] }')"
+
+  if [ "$E_ON" = 1 ]; then
+    printf '%s  %s' "$HN" "$E_T"; [ "$E_FOK" = 0 ] || printf '   (%s, %s)' "$E_TY" "$E_ST"; printf '\n'
+  else printf '%s  (no longer in the register: last seen in %s, %s)\n' "$HN" "$lastc" "$lastd"; fi
+  [ -z "$shallow" ] || printf '(a shallow clone: the history below is incomplete)\n'
+  printf '\nVersions of the entry (%s)\n' "$nv"
+  [ "${#lines[@]}" -eq 0 ] || printf '%s\n' "${lines[@]}"
+  printf '\nCommits that name register %s (%s)\n' "$HN" "$nc"
+  [ -z "$commits" ] || printf '%s\n' "$commits" | awk '{ if(length($0)>104) $0=substr($0,1,103) "…"; print "  " $0 }'
+  if [ -z "$cites" ]; then printf '\nCited in no tracked file   (as register map --entry %s --all)\n' "$HN"
+  else
+    local nf; nf=$(printf '%s\n' "$cites" | wc -l)
+    printf '\nCited in %d file%s   (as register map --entry %s --all)\n%s\n' "$nf" "$( [ "$nf" -eq 1 ] || echo s)" "$HN" "$cites"
+  fi
+}
+
 # Requested help goes to stdout at exit 0; usage on error to stderr at exit 1 (B52).
 usage() {
   cat <<'EOF'
@@ -835,6 +998,9 @@ register — checks and renders the deviations register (docs/official/DEVIATION
   register map [--entry N | --file PATH] [--all] [--check]
                      # where `register N` is cited (live files; --all for every tracked
                      # file); --check exits 1 on a citation of a missing entry
+  register history <N>
+                     # entry N's history from git: its versions, the commits that name
+                     # it, the files that cite it
   (set REGISTER_FILE to work on another register; REGISTER_BASE resolves its Source paths elsewhere)
 EOF
 }
@@ -846,6 +1012,7 @@ case "$sub" in
   check)  resolve_file; cmd_check "$@" ;;
   render) resolve_file; cmd_render "$@" ;;
   map)    resolve_file; cmd_map "$@" ;;
+  history) resolve_file; cmd_history "$@" ;;
   -h|--help|help) usage; exit 0 ;;
-  *) err "unknown command '$sub' (check | render | map)" ;;
+  *) err "unknown command '$sub' (check | render | map | history)" ;;
 esac

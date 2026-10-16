@@ -94,6 +94,8 @@
   tr.detail td{padding:0 14px}
   tr.detail .box{margin:0 0 12px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;font-size:13px;color:var(--text-dim);line-height:1.6}
   tr.detail .box .none{color:var(--text-faint);font-style:italic}
+  tr.detail .dtext{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);color:var(--text)}
+  tr.detail .dtext.solo{margin-top:0;padding-top:0;border-top:0}
   tr.detail .meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:9px;font-size:11.5px;color:var(--text-faint);font-family:var(--mono)}
   tr.detail .meta b{color:var(--text-dim);font-weight:500}
   .empty{padding:26px 16px;text-align:center;color:var(--text-faint);font-size:13px}
@@ -145,6 +147,8 @@ const MODEL = {
   "doc":{allowed:["open","in-progress","done","blocked","parked","dropped",],flow:["open","in-progress","done",],def:"open"},
   "testing":{allowed:["open","in-progress","done","blocked","parked","dropped",],flow:["open","in-progress","done",],def:"open"},
 };
+const DETAILS = {
+};
 </script>
 
 <script>
@@ -157,7 +161,7 @@ const MODEL = {
   function natCmp(a,b){const ax=String(a).match(/(\d+|\D+)/g)||[],bx=String(b).match(/(\d+|\D+)/g)||[];const n=Math.max(ax.length,bx.length);for(let i=0;i<n;i++){const p=ax[i],q=bx[i];if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^\d+$/.test(p),qn=/^\d+$/.test(q);if(pn&&qn){const d=parseInt(p)-parseInt(q);if(d)return d}else if(p!==q)return p<q?-1:1}return 0}
   const oi=s=>{const i=ORDER.indexOf(s);return i<0?ORDER.length:i};   // unknown statuses sort LAST, not first (B82)
   function cmp(a,b){let r;if(state.sortKey==="id")r=natCmp(a.id,b.id);else if(state.sortKey==="status")r=(oi(a.status)-oi(b.status))||natCmp(a.id,b.id);else if(state.sortKey==="name")r=a.name.toLowerCase()<b.name.toLowerCase()?-1:a.name.toLowerCase()>b.name.toLowerCase()?1:0;else{const ka=a[state.sortKey]||"",kb=b[state.sortKey]||"";r=(ka<kb?-1:ka>kb?1:0)||natCmp(a.id,b.id)}return r*state.dir}
-  function match(r){if(state.statuses.size&&!state.statuses.has(r.status))return false;const ss=state.secStatuses[r.cat];if(ss&&ss.size&&!ss.has(r.status))return false;if(state.q){const q=state.q.toLowerCase();if(!(r.id.toLowerCase().includes(q)||r.name.toLowerCase().includes(q)||(r.desc||"").toLowerCase().includes(q)))return false}return true}
+  function match(r){if(state.statuses.size&&!state.statuses.has(r.status))return false;const ss=state.secStatuses[r.cat];if(ss&&ss.size&&!ss.has(r.status))return false;if(state.q){const q=state.q.toLowerCase();if(!(r.id.toLowerCase().includes(q)||r.name.toLowerCase().includes(q)||(r.desc||"").toLowerCase().includes(q)||(DETAILS[r.id]||"").toLowerCase().includes(q)))return false}return true}
   const depth=id=>(id.match(/\./g)||[]).length;
   function ancestors(id){const p=[];let s=id;while(s.includes(".")){s=s.slice(0,s.lastIndexOf("."));p.push(s)}return p}
   const pill=st=>`<span class="pill" style="--sc:${COLOR[st]||'#888'}"><span class="dot"></span><span class="em">${EMOJI[st]||''}</span>${esc(st)}</span>`;
@@ -204,8 +208,10 @@ const MODEL = {
       // An empty SECTION and a filtered-out section are different facts (B92): a
       // pristine page must not blame "the current filter" it doesn't have.
       if(rows.length===0)body=`<tr><td colspan="5"><div class="empty">${all.length===0?`No ${esc(cat.label.toLowerCase())} recorded yet.`:`No ${esc(cat.label.toLowerCase())} match the current filter.`}</div></td></tr>`;
-      else body=rows.map(r=>{const open=state.expanded.has(r.id),d=depth(r.id),hasDetail=!!r.desc||d>0;
-        const det=open?`<tr class="detail"><td colspan="5"><div class="box">${r.desc?esc(r.desc):'<span class="none">No description recorded.</span>'}<div class="meta"><span><b>id</b> ${esc(r.id)}</span>${d>0?`<span><b>part of</b> ${ancestors(r.id).map(esc).join(" ← ")}</span>`:''}<span><b>created</b> ${esc(r.created)}</span><span><b>status changed</b> ${esc(r.changed)}</span></div></div></td></tr>`:"";
+      // A detail section (DETAILS, from '## Details') shows below the Description, its line
+      // breaks kept by CSS (pre-wrap), its text escaped like every other field: no Markdown.
+      else body=rows.map(r=>{const open=state.expanded.has(r.id),d=depth(r.id),dt=DETAILS[r.id]||"",hasDetail=!!r.desc||!!dt||d>0;
+        const det=open?`<tr class="detail"><td colspan="5"><div class="box">${r.desc?esc(r.desc):(dt?'':'<span class="none">No description recorded.</span>')}${dt?`<div class="dtext${r.desc?'':' solo'}">${esc(dt)}</div>`:''}<div class="meta"><span><b>id</b> ${esc(r.id)}</span>${d>0?`<span><b>part of</b> ${ancestors(r.id).map(esc).join(" ← ")}</span>`:''}<span><b>created</b> ${esc(r.created)}</span><span><b>status changed</b> ${esc(r.changed)}</span></div></div></td></tr>`:"";
         return `<tr class="row ${open?'open':''}" data-id="${esc(r.id)}" tabindex="0" role="button" aria-expanded="${open}"><td class="c-id"><span class="idv"><span class="depth">${'· '.repeat(d)}</span>${esc(r.id)}</span></td><td class="c-st">${pill(r.status)}</td><td class="c-cr">${esc(r.created)}</td><td class="c-ch">${esc(r.changed)}</td><td><div class="name"><span class="exp ${hasDetail?'has-detail':''}">▶</span><span>${esc(r.name)}</span></div></td></tr>${det}`}).join("");
       html+=`<section class="section ${collapsed?'collapsed':''}" data-cat="${cat.key}"><div class="sec-head" role="button" tabindex="0" aria-expanded="${!collapsed}"><span class="chev">▼</span><h2>${esc(cat.label)}</h2><span class="sec-idp">${esc(cat.idp)}</span><span class="sec-n">${rows.length}${rows.length!==all.length?` / ${all.length}`:''}</span></div><div class="sec-body">${flowFor(cat.key)}<table><thead><tr>${cols.map(th).join("")}</tr></thead><tbody>${body}</tbody></table></div></section>`;
     }

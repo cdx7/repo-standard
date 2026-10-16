@@ -1,7 +1,7 @@
 # tracker — <repo>
 
-<!-- IDs, statuses, and dates are maintained by `track`. Edit Name/Description by hand;
-     use `track add` / `track set-status` for everything else. -->
+<!-- IDs, statuses, and dates are maintained by `track`. Edit Name/Description and the
+     Details section by hand; use `track add` / `track set-status` for everything else. -->
 
 ## Legend
 | Symbol | Status      | Meaning                              |
@@ -32,3 +32,8 @@
 ## Testing
 | ID | Status | Created | Status Changed | Name | Description |
 | -- | ------ | ------- | -------------- | ---- | ----------- |
+
+## Details
+
+<!-- Optional: a section per item that needs more than its one-line Description:
+     `### <ID> — <Name>` (the row's Name exactly), then free Markdown. track render shows it. -->

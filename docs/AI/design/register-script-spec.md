@@ -2,7 +2,8 @@
 
 *Draft, 2026-10-01, for tracker F17. It builds on a plan written in the first vendor-derived
 repo to adopt the standard, and on the maintainer's decisions R1-R4 of 2026-09-30, plus Q1-Q5
-of 2026-10-01 (§ 9). Built in four slices (§ 10) and released in 0.4.0.*
+of 2026-10-01 (§ 9). Built in four slices (§ 10) and released in 0.4.0. `history` (§ 2) was
+added on 2026-10-15, with `track history`.*
 
 - **What it is:** `bin/register`, a tool beside `bin/track` for a vendor-derived repo's
   register, `docs/official/DEVIATIONS.md`. It does for the register what `track` does for
@@ -16,7 +17,7 @@ of 2026-10-01 (§ 9). Built in four slices (§ 10) and released in 0.4.0.*
 - **Who uses it:** vendor-derived repos only. The first register it was built for had 37
   entries in 1,630 lines.
 - **Dependencies:** the same as `track`: bash (>= 4, guarded at the door) + coreutils +
-  `awk`/`sed` + `git` (for the map only). No `jq`, no config file, no network.
+  `awk`/`sed` + `git` (for `map` and `history` only). No `jq`, no config file, no network.
 
 ---
 
@@ -152,6 +153,51 @@ never counts as an entry, a header or a source (`track`'s B84 lesson).
     triage**. The tool never guesses a number for them.
 - `--check` exits 1 only on errors. `verify` runs it (§ 5); the pre-commit hook does not,
   because a citation lives in any file and the hook stays fast.
+
+### `register history <N>`
+- **Read-only:** prints entry N's history from git, oldest first in each part. No write, no
+  lock, no render; nothing is recorded (decided 2026-10-15, with `track history`). It needs
+  no markers, since a register's history predates them.
+- **Versions of the entry:** every commit that touched the register, followed across renames.
+  In each version, the entry's section, from `## N. ` to the next `# ` or `## ` heading and
+  fence-aware, is compared with the previous version's. A version is listed where it changed,
+  naming each change: `text changed (a → b lines)`, `title → "…"`, `header added: <fields>`,
+  each header field that changed (`Status active → closed`, `Updated — → 2026-10-15`, …),
+  `header removed`, `entry removed`, `entry back`. Line endings alone make no version.
+- **The first version** is the first commit with a `## N. ` heading. When no earlier version
+  of the file had any numbered heading, that commit numbered entries written before it, and
+  the line says the entry may be older.
+- **Uncommitted:** when the working copy's section differs from the last commit's, a last
+  line marked `uncommitted`, with no date.
+- **Commits that name it:** messages in HEAD's history that name the entry in one of five
+  forms, in any case: `register N`, `register entry N`, `register entries N`, `DEVIATIONS § N`
+  and `DEVIATIONS #N` (`DEVIATIONS.md` too). Each is matched whole, as `map` matches: not
+  inside a longer number, and not where `N` runs on into a date or a version; in a list such
+  as `register 20/22`, only the first number counts. A message is read with its lines joined,
+  since a wrapped message often splits a citation in two (`git log --grep` matches one line
+  at a time). Not matched: a bare `§ N` or `entry N`, which usually mean something else.
+- **Cited in:** the files and lines that `register map --entry N --all` lists.
+- **Exit:** 0 when the entry has any history, an entry whose heading is gone included (headed
+  "no longer in the register: last seen in <hash>, <date>"). 1 for a number never in the
+  file, one that is not a whole number from 1 (a leading zero is ignored), or a register
+  outside a git work tree. A shallow clone prints the history it has and says it is
+  incomplete.
+
+```
+$ register history 12
+12  An example entry   (harness, active)
+
+Versions of the entry (3)
+  2026-05-12  5d1e0b4  first appears as entry 12
+  2026-05-21  a07c3f9  text changed (14 → 19 lines)
+  2026-09-17  e2b8d61  header added: harness · active · 2026-05-12 · 2026-05-21 · DG v1.9 § 3 p.6
+
+Commits that name register 12 (1)
+  2026-05-21  a07c3f9  fix: the harness waits for the second profile (register 12)
+
+Cited in 1 file   (as register map --entry 12 --all)
+  scripts/harness.sh: 4, 88
+```
 
 ---
 

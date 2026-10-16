@@ -5,9 +5,13 @@
 #   track add <bug|feature|doc|testing> "<name>" [--parent ID] [--status S] [--desc "…"]
 #   track set-status <ID> <status>
 #   track render [--check]             # regenerate tracker.html (--check: verify, write nothing)
+#   track history <ID>                 # read-only: the item's history from git
 # Names and --desc text are taken RAW: track escapes | itself, so pass unescaped text — a
 # pre-escaped \| is stored as \\| and renders with its backslashes.
 # Auto-maintains ID (per-category, nesting), Created (once), Status Changed (on change).
+# An item's longer detail goes in an optional '## Details' section after the four tables:
+# '### <ID> — <Name>' (the row's Name exactly), then free text, written by hand; render shows
+# it under the row and refuses a heading it cannot match to exactly one row.
 # Tracker resolution order: $TRACKER_FILE; the repo the INVOKED copy lives in
 # ($0/../docs/dev-notes/tracker.md); CLAUDE_PROJECT_DIR or the cwd's git root;
 # ./tracker.md as a last resort (announced on stderr).
@@ -414,6 +418,67 @@ cmd_render() {
   # hook all funnel through here, so none of them can launder such a file.
   us="$(awk 'index($0,"\037"){print NR; exit}' "$FILE")"
   [ -z "$us" ] || err "$FILE line $us: raw 0x1f (US) byte — the render pipeline uses it as its field separator; remove it first"
+
+  # Detail sections (spec: docs/AI/design/track-script-spec.md § 1). One optional
+  # '## Details' section holds an item heading '### <ID> — <Name>' per item and free text up
+  # to the next item heading, the next '## ' heading or EOF; text before the first item
+  # heading belongs to no item. A pass of its own, so the row pipeline below is untouched: it
+  # re-reads the rows (the same fence- and section-aware rules) to check every heading
+  # against them. Refused, like the 0x1f byte, since the page could not show it truthfully:
+  # a '### ' line that is not an item heading, an ID with no row, a second section for one
+  # ID, a heading name that differs from the row's Name, a second '## Details' section. A
+  # fenced block inside a detail is text (a quoted '### B05' starts nothing). Newlines ride
+  # as 0x02 because the read loop below is line-based. LC_ALL=C: names compare as bytes.
+  local dout details_js dtyp did dtxt ds
+  dout="$(LC_ALL=C awk '
+    function trim(x){ gsub(/^[ \t]+|[ \t]+$/,"",x); return x }
+    function prob(ln,msg){ P[++np]=ln "\037" msg }
+    function flush(){ if(cur!=""){ t=text; sub(/^\002+/,"",t); sub(/\002+$/,"",t); D[cur]=t }; cur=""; text="" }
+    function keep(){ if(mode=="d" && cur!="") text=text $0 "\002" }
+    BEGIN{ SEP=" — " }
+    { sub(/\r$/,"") }
+    /^ {0,3}(```|~~~)/ { t=($0 ~ /^ {0,3}~~~/)?"t":"b"; if(fence=="")fence=t; else if(fence==t)fence=""; keep(); next }
+    fence!="" { keep(); next }
+    /^## / {
+      flush()
+      if($0 ~ /^## Details[[:space:]]*$/){ if(nd++) prob(NR,"a second '\''## Details'\'' section (one holds every item'\''s detail)"); mode="d"; next }
+      mode=($0 ~ /^## (Bugs|Features|Documentation|Testing)[[:space:]]*$/)?"c":""; next
+    }
+    mode=="c" && /^\|/ {
+      line=$0; gsub(/\\\|/,"\001",line); split(line,f,"|")
+      id=trim(f[2]); if(id=="ID" || id ~ /^:?-+:?$/) next
+      nm=trim(f[6]); gsub(/\001/,"|",nm); RN[id]=nm; next
+    }
+    mode=="d" && /^### / {
+      flush(); h=substr($0,5); i=index(h,SEP)
+      if(!i){ prob(NR,"not an item heading: expected '\''### <ID> — <Name>'\'' (use #### for a heading inside a detail)"); next }
+      id=trim(substr(h,1,i-1)); nm=trim(substr(h,i+length(SEP)))
+      if(id !~ /^[BFDT][0-9]+(\.[0-9]+)*$/){ prob(NR,"not an item heading: '\''" id "'\'' is not a tracker ID"); next }
+      if(id in HL){ prob(NR,"a second detail section for " id " (the first is at line " HL[id] ")"); next }
+      HL[id]=NR; HN[id]=nm; ord[++no]=id; cur=id; next
+    }
+    mode=="d" { keep() }
+    END{
+      flush()
+      for(k=1;k<=no;k++){ id=ord[k]
+        if(!(id in RN)) prob(HL[id],"detail section " id " has no row in the tables")
+        else if(HN[id]!=RN[id]) prob(HL[id],"detail section " id ": heading name \"" HN[id] "\" differs from the row'\''s Name \"" RN[id] "\"")
+      }
+      if(np){ for(k=1;k<=np;k++) print "E\037" P[k]; exit }
+      for(k=1;k<=no;k++) printf "D\037%s\037%s\n", ord[k], D[ord[k]]
+    }' "$FILE")"
+  if printf '%s\n' "$dout" | grep -q $'^E\037'; then
+    printf '%s\n' "$dout" | grep $'^E\037' | sort -t $'\037' -k2,2n \
+      | while IFS=$'\037' read -r _ ln msg; do printf 'track: %s line %s: %s\n' "$FILE" "$ln" "$msg" >&2; done
+    exit 1
+  fi
+  details_js="const DETAILS = {"$'\n'
+  while IFS=$'\037' read -r dtyp did dtxt; do
+    [ "$dtyp" = D ] || continue
+    ds="$(jsstr "$dtxt")"; ds="${ds//$'\002'/"\\n"}"
+    details_js+="  $(jsstr "$did"):$ds,"$'\n'
+  done <<<"$dout"
+  details_js+="};"
   out="$(dirname "$FILE")/tracker.html"
   # A directory-shaped destination would swallow the mv (tracker.html/tracker.html.tmp.*)
   # while render printed success and --check reported STALE forever — B97's shape.
@@ -489,7 +554,7 @@ cmd_render() {
   done
   model_js+="};"
 
-  { printf '%s\n' "$rows_js"; printf '%s\n' "$emoji_js"; printf '%s\n' "$model_js"; } > "$datafile"
+  { printf '%s\n' "$rows_js"; printf '%s\n' "$emoji_js"; printf '%s\n' "$model_js"; printf '%s\n' "$details_js"; } > "$datafile"
 
   # Two substitutions into the static template: the data block, and the repo name.
   # BOTH ride ENVIRON: awk -v applies backslash processing, so a path with a backslash
@@ -597,6 +662,8 @@ cmd_render() {
   tr.detail td{padding:0 14px}
   tr.detail .box{margin:0 0 12px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;font-size:13px;color:var(--text-dim);line-height:1.6}
   tr.detail .box .none{color:var(--text-faint);font-style:italic}
+  tr.detail .dtext{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);color:var(--text)}
+  tr.detail .dtext.solo{margin-top:0;padding-top:0;border-top:0}
   tr.detail .meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:9px;font-size:11.5px;color:var(--text-faint);font-family:var(--mono)}
   tr.detail .meta b{color:var(--text-dim);font-weight:500}
   .empty{padding:26px 16px;text-align:center;color:var(--text-faint);font-size:13px}
@@ -652,7 +719,7 @@ cmd_render() {
   function natCmp(a,b){const ax=String(a).match(/(\d+|\D+)/g)||[],bx=String(b).match(/(\d+|\D+)/g)||[];const n=Math.max(ax.length,bx.length);for(let i=0;i<n;i++){const p=ax[i],q=bx[i];if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^\d+$/.test(p),qn=/^\d+$/.test(q);if(pn&&qn){const d=parseInt(p)-parseInt(q);if(d)return d}else if(p!==q)return p<q?-1:1}return 0}
   const oi=s=>{const i=ORDER.indexOf(s);return i<0?ORDER.length:i};   // unknown statuses sort LAST, not first (B82)
   function cmp(a,b){let r;if(state.sortKey==="id")r=natCmp(a.id,b.id);else if(state.sortKey==="status")r=(oi(a.status)-oi(b.status))||natCmp(a.id,b.id);else if(state.sortKey==="name")r=a.name.toLowerCase()<b.name.toLowerCase()?-1:a.name.toLowerCase()>b.name.toLowerCase()?1:0;else{const ka=a[state.sortKey]||"",kb=b[state.sortKey]||"";r=(ka<kb?-1:ka>kb?1:0)||natCmp(a.id,b.id)}return r*state.dir}
-  function match(r){if(state.statuses.size&&!state.statuses.has(r.status))return false;const ss=state.secStatuses[r.cat];if(ss&&ss.size&&!ss.has(r.status))return false;if(state.q){const q=state.q.toLowerCase();if(!(r.id.toLowerCase().includes(q)||r.name.toLowerCase().includes(q)||(r.desc||"").toLowerCase().includes(q)))return false}return true}
+  function match(r){if(state.statuses.size&&!state.statuses.has(r.status))return false;const ss=state.secStatuses[r.cat];if(ss&&ss.size&&!ss.has(r.status))return false;if(state.q){const q=state.q.toLowerCase();if(!(r.id.toLowerCase().includes(q)||r.name.toLowerCase().includes(q)||(r.desc||"").toLowerCase().includes(q)||(DETAILS[r.id]||"").toLowerCase().includes(q)))return false}return true}
   const depth=id=>(id.match(/\./g)||[]).length;
   function ancestors(id){const p=[];let s=id;while(s.includes(".")){s=s.slice(0,s.lastIndexOf("."));p.push(s)}return p}
   const pill=st=>`<span class="pill" style="--sc:${COLOR[st]||'#888'}"><span class="dot"></span><span class="em">${EMOJI[st]||''}</span>${esc(st)}</span>`;
@@ -699,8 +766,10 @@ cmd_render() {
       // An empty SECTION and a filtered-out section are different facts (B92): a
       // pristine page must not blame "the current filter" it doesn't have.
       if(rows.length===0)body=`<tr><td colspan="5"><div class="empty">${all.length===0?`No ${esc(cat.label.toLowerCase())} recorded yet.`:`No ${esc(cat.label.toLowerCase())} match the current filter.`}</div></td></tr>`;
-      else body=rows.map(r=>{const open=state.expanded.has(r.id),d=depth(r.id),hasDetail=!!r.desc||d>0;
-        const det=open?`<tr class="detail"><td colspan="5"><div class="box">${r.desc?esc(r.desc):'<span class="none">No description recorded.</span>'}<div class="meta"><span><b>id</b> ${esc(r.id)}</span>${d>0?`<span><b>part of</b> ${ancestors(r.id).map(esc).join(" ← ")}</span>`:''}<span><b>created</b> ${esc(r.created)}</span><span><b>status changed</b> ${esc(r.changed)}</span></div></div></td></tr>`:"";
+      // A detail section (DETAILS, from '## Details') shows below the Description, its line
+      // breaks kept by CSS (pre-wrap), its text escaped like every other field: no Markdown.
+      else body=rows.map(r=>{const open=state.expanded.has(r.id),d=depth(r.id),dt=DETAILS[r.id]||"",hasDetail=!!r.desc||!!dt||d>0;
+        const det=open?`<tr class="detail"><td colspan="5"><div class="box">${r.desc?esc(r.desc):(dt?'':'<span class="none">No description recorded.</span>')}${dt?`<div class="dtext${r.desc?'':' solo'}">${esc(dt)}</div>`:''}<div class="meta"><span><b>id</b> ${esc(r.id)}</span>${d>0?`<span><b>part of</b> ${ancestors(r.id).map(esc).join(" ← ")}</span>`:''}<span><b>created</b> ${esc(r.created)}</span><span><b>status changed</b> ${esc(r.changed)}</span></div></div></td></tr>`:"";
         return `<tr class="row ${open?'open':''}" data-id="${esc(r.id)}" tabindex="0" role="button" aria-expanded="${open}"><td class="c-id"><span class="idv"><span class="depth">${'· '.repeat(d)}</span>${esc(r.id)}</span></td><td class="c-st">${pill(r.status)}</td><td class="c-cr">${esc(r.created)}</td><td class="c-ch">${esc(r.changed)}</td><td><div class="name"><span class="exp ${hasDetail?'has-detail':''}">▶</span><span>${esc(r.name)}</span></div></td></tr>${det}`}).join("");
       html+=`<section class="section ${collapsed?'collapsed':''}" data-cat="${cat.key}"><div class="sec-head" role="button" tabindex="0" aria-expanded="${!collapsed}"><span class="chev">▼</span><h2>${esc(cat.label)}</h2><span class="sec-idp">${esc(cat.idp)}</span><span class="sec-n">${rows.length}${rows.length!==all.length?` / ${all.length}`:''}</span></div><div class="sec-body">${flowFor(cat.key)}<table><thead><tr>${cols.map(th).join("")}</tr></thead><tbody>${body}</tbody></table></div></section>`;
     }
@@ -739,6 +808,152 @@ HTML
   printf 'rendered %s  (%s items)\n' "$out" "$n"
 }
 
+# ── history ───────────────────────────────────────────────────────────────────────────
+# One item's history, read from git on demand (spec § 3): the committed versions of its
+# row and of its detail section where either changed, the commits whose messages name the
+# ID, and the tracked files that cite it. Nothing is recorded: git already holds the
+# record, and a second copy could drift. Read-only — no lock, no render, no write.
+# hist_record: stdin is one version of tracker.md → at most two records, the row
+# ("R␟status␟created␟changed␟name␟description") and the detail ("D␟text", newlines as
+# 0x02). Fence- and section-aware like render, so a quoted example row is not the item.
+hist_record() {
+  LC_ALL=C awk -v id="$1" '
+    function trim(x){ gsub(/^[ \t]+|[ \t]+$/,"",x); return x }
+    { sub(/\r$/,"") }
+    /^ {0,3}(```|~~~)/ { t=($0 ~ /^ {0,3}~~~/)?"t":"b"; if(fence=="")fence=t; else if(fence==t)fence=""; if(cur) text=text $0 "\002"; next }
+    fence!="" { if(cur) text=text $0 "\002"; next }
+    /^## / { cur=0
+      mode=($0 ~ /^## (Bugs|Features|Documentation|Testing)[[:space:]]*$/)?"c":(($0 ~ /^## Details[[:space:]]*$/)?"d":""); next }
+    mode=="c" && /^\|/ {
+      line=$0; gsub(/\\\|/,"\001",line); split(line,f,"|")
+      if(trim(f[2])==id && !got){ got=1
+        s=trim(f[3]); k=split(s,a," "); nm=trim(f[6]); ds=trim(f[7]); gsub(/\001/,"|",nm); gsub(/\001/,"|",ds)
+        printf "R\037%s\037%s\037%s\037%s\037%s\n", a[k], trim(f[4]), trim(f[5]), nm, ds }
+      next }
+    mode=="d" && /^### / { cur=0; h=substr($0,5); i=index(h," — ")
+      if(i && trim(substr(h,1,i-1))==id && !dgot){ cur=1; dgot=1 }; next }
+    mode=="d" && cur { text=text $0 "\002" }
+    END{ if(dgot){ sub(/^\002+/,"",text); sub(/\002+$/,"",text); printf "D\037%s\n", text } }'
+}
+hist_commas(){ awk -v n="$1" 'BEGIN{s=""; while(length(n)>3){s="," substr(n,length(n)-2) s; n=substr(n,1,length(n)-3)} print n s}'; }
+hist_lines(){ [ -n "$1" ] || { echo 0; return; }; local t="${1//[!$'\002']/}"; echo $(( ${#t} + 1 )); }
+# What changed between two versions of an item, as one ' · '-joined phrase. Arguments:
+# the word for a row appearing ('added', or 'row back' after a removal), the previous
+# present/status/created/changed/name/desc/detail, then the current seven.
+hist_delta(){
+  local first=$1 pp=$2 ps=$3 pc=$4 pch=$5 pn=$6 pd=$7 pt=$8 cp=$9 cs=${10} cc=${11} cch=${12} cn=${13} cd=${14} ct=${15}
+  local out=() n
+  if [ "$pp" = 0 ] && [ "$cp" = 1 ]; then
+    out+=("$first: $cs")
+    [ -z "$cd" ] || out+=("Description $(hist_commas ${#cd}) chars")
+  elif [ "$pp" = 1 ] && [ "$cp" = 0 ]; then
+    out+=("row removed")
+  elif [ "$cp" = 1 ]; then
+    if [ "$ps" != "$cs" ]; then out+=("status $ps → $cs ($cch)")
+    elif [ "$pch" != "$cch" ]; then out+=("Status Changed $pch → $cch"); fi
+    [ "$pc" = "$cc" ] || out+=("Created $pc → $cc")
+    if [ "$pn" != "$cn" ]; then n="$cn"; [ ${#n} -le 60 ] || n="${n:0:57}…"; out+=("Name → \"$n\""); fi
+    [ "$pd" = "$cd" ] || out+=("Description $(hist_commas ${#pd}) → $(hist_commas ${#cd}) chars")
+  fi
+  if [ "$pt" != "$ct" ]; then
+    if [ -z "$pt" ]; then out+=("detail added ($(hist_lines "$ct") lines)")
+    elif [ -z "$ct" ]; then out+=("detail removed")
+    else out+=("detail $(hist_lines "$pt") → $(hist_lines "$ct") lines"); fi
+  fi
+  local IFS=$'\037'; local j="${out[*]}"; printf '%s' "${j//$'\037'/ · }"
+}
+cmd_history() {
+  [ $# -eq 1 ] || err "usage: track history <ID>"
+  local id="$1"
+  printf '%s' "$id" | grep -qE '^[BFDT][0-9]{1,9}(\.[0-9]{1,9})*$' \
+    || err "'$id' is not a tracker ID (B, F, D or T, then digits; a child adds .N)"
+  # Physical paths on both sides (pwd -P): git names the toplevel without the symlinks
+  # a logical path may carry, and the tracker's repo-relative path must line up with it.
+  local dir root rel rdir
+  dir="$(cd "$(dirname -- "$FILE")" && pwd -P)"
+  root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" \
+    || err "history reads git: $FILE is not in a git work tree"
+  rdir="${dir#"$root"}"; rdir="${rdir#/}"; rel="${rdir:+$rdir/}$(basename -- "$FILE")"
+  local shallow=""; [ "$(git -C "$root" rev-parse --is-shallow-repository 2>/dev/null)" = true ] && shallow=1
+
+  # Versions: every commit that touched the file, oldest first. --follow keeps the
+  # history across a rename, and git cannot combine it with --reverse, hence tac.
+  local lines=() c d p rec r s cr ch nm ds dt what k a1 a2 a3 a4 a5
+  local pp=0 ps="" pc="" pch="" pn="" pd="" pt="" seen=0 lastc="" lastd="" nv=0
+  while IFS=' ' read -r c d p; do
+    # A commit that deleted the file has no version to show: the row is absent there,
+    # and pipefail must not end the walk (set -e would exit quietly, with git's 128).
+    rec="$(git -C "$root" show "$c:$p" 2>/dev/null | hist_record "$id" || true)"
+    r=0 s="" cr="" ch="" nm="" ds="" dt=""
+    while IFS=$'\037' read -r k a1 a2 a3 a4 a5; do
+      case "$k" in R) r=1 s=$a1 cr=$a2 ch=$a3 nm=$a4 ds=$a5 ;; D) dt=$a1 ;; esac
+    done <<<"$rec"
+    if [ "$r" = 1 ] || [ "$seen" = 1 ] || [ -n "$dt" ]; then
+      what="$(hist_delta "$( [ "$seen" = 1 ] && echo 'row back' || echo added )" "$pp" "$ps" "$pc" "$pch" "$pn" "$pd" "$pt" "$r" "$s" "$cr" "$ch" "$nm" "$ds" "$dt")"
+      if [ -n "$what" ]; then lines+=("  $d  $c  $what"); nv=$((nv+1)); fi
+      [ "$r" = 1 ] && { seen=1; lastc=$c; lastd=$d; }
+      pp=$r ps=$s pc=$cr pch=$ch pn=$nm pd=$ds pt=$dt
+    fi
+  done < <(git -C "$root" log --follow --format='@@%h %cs' --name-only -- "$rel" 2>/dev/null \
+             | awk '/^@@/{c=substr($0,3); next} NF && c!=""{print c, $0; c=""}' | tac)
+
+  # The working copy: an 'uncommitted' last line when it differs from the last commit.
+  rec="$(hist_record "$id" < "$FILE")"
+  r=0 s="" cr="" ch="" nm="" ds="" dt=""
+  while IFS=$'\037' read -r k a1 a2 a3 a4 a5; do
+    case "$k" in R) r=1 s=$a1 cr=$a2 ch=$a3 nm=$a4 ds=$a5 ;; D) dt=$a1 ;; esac
+  done <<<"$rec"
+  what="$(hist_delta "$( [ "$seen" = 1 ] && echo 'row back' || echo added )" "$pp" "$ps" "$pc" "$pch" "$pn" "$pd" "$pt" "$r" "$s" "$cr" "$ch" "$nm" "$ds" "$dt")"
+  [ -z "$what" ] || lines+=("  uncommitted          $what")
+  [ "$r" = 1 ] || [ "$seen" = 1 ] || err "$id has no row, now or in the history of $rel"
+
+  # Commits whose messages name the ID, matched whole: never inside a longer number, never
+  # a child's ID (each child has its own history), but an ID ending a sentence still counts.
+  local pat="(^|[^A-Za-z0-9.])${id//./\\.}([^0-9.]|\\.([^0-9]|\$)|\$)" commits
+  commits="$(git -C "$root" log --reverse -E --format='%cs  %h  %s' --grep="$pat" 2>/dev/null)"
+
+  # Tracked files that cite it, the tracker's own three files left out (the sidecar holds
+  # the highest ID ever issued, so it would "cite" one). Outside the standard's source repo
+  # (detected as sync detects it), the standard's managed files are left out too: their
+  # comments cite the standard's own IDs, which every repo's numbering repeats. Records —
+  # docs/AI/ and z-deprecated/, the register map's split — are counted per folder.
+  local ex=(":(exclude)$rel" ":(exclude)${rdir:+$rdir/}tracker.html" ":(exclude)${rdir:+$rdir/}tracker-hwm") m
+  if ! { [ -f "$root/standard/STANDARD.md" ] && [ -d "$root/template/bin" ]; }; then
+    for m in bin/track bin/register .githooks/pre-commit .claude/hooks/stop-handoff-check.sh \
+             .claude/hooks/session-start-rollover-check.sh REPO-STANDARD.md; do ex+=(":(exclude)$m"); done
+  fi
+  # git grep exits 1 when nothing matches, which set -e would take for a failure.
+  local cites; cites="$(git -C "$root" grep -l -E -e "$pat" -- . "${ex[@]}" 2>/dev/null || true)"
+
+  local cat; cat="$(cat_of_id "$id")"
+  if [ "$r" = 1 ]; then printf '%s  %s   (%s, %s)\n' "$id" "$nm" "$cat" "$s"
+  else printf '%s  (no longer in the tracker: last seen in %s, %s)\n' "$id" "$lastc" "$lastd"; fi
+  [ -z "$shallow" ] || printf '(a shallow clone: the history below is incomplete)\n'
+  printf '\nVersions of the row (%s)\n' "$nv"
+  [ "${#lines[@]}" -eq 0 ] || printf '%s\n' "${lines[@]}"
+  local nc=0; [ -z "$commits" ] || nc=$(printf '%s\n' "$commits" | wc -l)
+  printf '\nCommits that name %s (%s)\n' "$id" "$nc"
+  [ -z "$commits" ] || printf '%s\n' "$commits" | awk '{ if(length($0)>104) $0=substr($0,1,103) "…"; print "  " $0 }'
+  if [ -z "$cites" ]; then printf '\nCited in no other tracked file\n'
+  else
+    printf '%s\n' "$cites" | awk '
+      /^(docs\/AI\/|z-deprecated\/)/ { r++
+        # one count per folder directly under docs/AI/ (or z-deprecated/ as a whole)
+        if($0 ~ /^z-deprecated\//) d="z-deprecated/"
+        else { d=substr($0,9); i=index(d,"/"); d=i ? "docs/AI/" substr(d,1,i) : "docs/AI/" }
+        if(!(d in R)) ord[++no]=d; R[d]++; next }
+      { l++; L[l]=$0 }
+      END{ printf "\nCited in %d file%s\n", l+r, (l+r==1)?"":"s"
+        if(l){ s=""; for(i=1;i<=l;i++) s=s (i>1?", ":"") L[i]; print wrap(sprintf("  live (%d):", l), s) }
+        if(r){ s=""; for(i=1;i<=no;i++) s=s (i>1?", ":"") ord[i] " " R[ord[i]]; print wrap(sprintf("  records (%d):", r), s) } }
+      function wrap(lbl, s,   out, w, n, k, a, pad){ pad=sprintf("%-16s",""); out=sprintf("%-16s",lbl); w=16
+        n=split(s,a,", "); for(k=1;k<=n;k++){ t=a[k] (k<n?",":"")
+          if(w>16 && w+1+length(t)>96){ out=out "\n" pad; w=16 } else if(w>16){ out=out " "; w++ }
+          out=out t; w+=length(t) }
+        return out }'
+  fi
+}
+
 # Requested help goes to stdout at exit 0; only usage-on-error goes to stderr at
 # exit 1 (B52 — init, sync and verify all exit 0 for an explicit help request).
 usage() {
@@ -747,8 +962,10 @@ track — minimal tracker CLI
   track add <bug|feature|doc|testing> "<name>" [--parent ID] [--status S] [--desc "…"]
   track set-status <ID> <status>
   track render [--check]                        # regenerate tracker.html (--check: verify current, exit 1 if stale)
+  track history <ID>                            # the item's history from git: row versions, commits, citing files
   (add / set-status auto-render; set TRACK_NO_RENDER=1 to skip)
   (names and --desc are taken raw: track escapes | itself, so do not pre-escape it)
+  (an item's detail: '### <ID> — <Name>' under an optional '## Details' section, by hand)
 EOF
 }
 
@@ -759,6 +976,7 @@ case "$sub" in
   add)         resolve_file; cmd_add "$@" ;;
   set-status)  resolve_file; cmd_set_status "$@" ;;
   render)      resolve_file; cmd_render "$@" ;;
+  history)     resolve_file; cmd_history "$@" ;;
   -h|--help|help) usage; exit 0 ;;
-  *) err "unknown command '$sub' (add | set-status | render)" ;;
+  *) err "unknown command '$sub' (add | set-status | render | history)" ;;
 esac

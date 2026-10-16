@@ -24,9 +24,9 @@ Which version this repo follows, and its kind, are on the first line of
 
 - `bin/track` — the tracker tool. `bin/track add`, `bin/track set-status` and
   `bin/track render` keep `docs/dev-notes/tracker.md` and generate `tracker.html`; it sets
-  every ID and date.
+  every ID and date. `bin/track history <ID>` shows an item's history from git.
 - `bin/register` — vendor-derived repos only. The register tool: `bin/register check`,
-  `render` and `map` for `docs/official/DEVIATIONS.md`.
+  `render`, `map` and `history` for `docs/official/DEVIATIONS.md`.
 - `.githooks/pre-commit` — refuses a commit whose generated page is out of date against its
   staged source: `tracker.html`, and in a vendor-derived repo the register's summary and
   `DEVIATIONS.html`.

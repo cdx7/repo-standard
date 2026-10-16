@@ -2,6 +2,54 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.6.0 — 2026-10-15
+A tracker item can now carry more than a one-line Description, and both tools can show an
+item's history, read from git. The two features share one minor release because both change
+`bin/track` and its spec.
+
+- **Detail sections:** an optional `## Details` section after the tracker's four tables, with
+  a `### <ID> — <Name>` heading (the row's Name exactly) for each item that needs more room,
+  then free text written by hand. `track render` shows an item's text in its expanded row,
+  after the Description, as plain text with its line breaks kept, and the page's search covers
+  it. Render refuses, naming each line, what it cannot match to exactly one row: a malformed
+  item heading, an ID with no row, a second section for one ID, a name that differs from the
+  row's, and a second `## Details` section. `add` and `set-status` never touch the section,
+  and a table row quoted inside it is never a row. The tracker skeleton ends with an empty
+  `## Details` section, and its header comment names it.
+- **`track history <ID>`:** prints the item's history from git, oldest first:
+  - each committed version of its row and detail section, naming what changed (the status
+    with its date, Created, the Name, the Description's length, the detail's lines);
+  - a last `uncommitted` line when the working copy differs;
+  - the commits whose messages name the ID;
+  - the tracked files that cite it: live files by name, and records in `docs/AI/` and
+    `z-deprecated/` counted per folder.
+
+  Outside the standard's source repo, the standard's managed files are left out of the
+  citations, since their comments cite the standard's own IDs. A row deleted by hand still
+  shows, its versions ending in `row removed`. Read-only, and nothing is recorded.
+- **`register history <N>`:** the same for a register entry:
+  - each version of its section, naming what changed (the text, the title, each header field);
+    the commit that numbered the register's entries is flagged, since the entry may be older;
+  - the commits whose messages name it in any of five forms (`register N`,
+    `register entry N`, `register entries N`, `DEVIATIONS § N`, `DEVIATIONS #N`), each message
+    read with its lines joined;
+  - the files that `register map --entry N --all` lists.
+- **Docs:** `standard/STANDARD.md` (section 5 and The register), `REPO-STANDARD.md`, the
+  transfer prompt (section 5), and the two tools' specs.
+- **Upgrading:** `sync` brings the new `bin/track`, `bin/register` (in a vendor-derived repo)
+  and `REPO-STANDARD.md`, and re-renders `tracker.html`, whose page changed. An existing
+  tracker gets no Details section: add the heading by hand when an item first needs one. Until
+  then `verify` reports that 0.6.0 is available.
+
+Tested with two new suites, `tests/track-details.sh` (35 checks, 20 of which fail on 0.5.3) and
+`tests/history.sh` (113 checks on fixture repositories, 78 of which fail on 0.5.3), and the
+release's other suites (48, 91, 73, 68 and 58 checks), each passing. The page was checked in
+headless Firefox. The history commands also ran on the standard's own tracker and, read-only,
+on a vendor-derived repo's tracker and on every entry of its register (37 entries, 62
+versions), where the commit counts equal a direct search of the repo's 318 commit messages.
+
+The README's State section says 0.6.0.
+
 ## 0.5.3 — 2026-10-14
 `bin/fleet` reads the fleet from its git hosts instead of the folders on one machine, and
 `init` and `sync` give a vendor-derived repo's existing `.gitignore` the register's temp-file

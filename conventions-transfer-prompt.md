@@ -132,11 +132,15 @@ One file, `docs/dev-notes/tracker.md`, four categories — Bugs / Features / Doc
 Testing. Every row: a status, a stable ID (B/F/D/T prefix, zero-padded to at least two digits
 — B01, F15, B142 — with unpadded nesting like F12.2.1; cite IDs as the tool prints them), a
 Created date, a Status-Changed date. The standard maintains this with a `track` CLI (`add`,
-`set-status`, `render` → an interactive `tracker.html` view) plus a pre-commit guard that
-blocks any commit whose rendered view is stale against the staged tracker.md. If you cannot
-get the tooling: keep the same single file and table shape by hand, maintain IDs and dates
-scrupulously (they are only trustworthy when a tool sets them — say in the file that it is
-hand-maintained), and skip the generated view rather than hand-writing one.
+`set-status`, `render` → an interactive `tracker.html` view; `history` → an item's history
+from git) plus a pre-commit guard that blocks any commit whose rendered view is stale against
+the staged tracker.md. If you cannot get the tooling: keep the same single file and table
+shape by hand, maintain IDs and dates scrupulously (they are only trustworthy when a tool sets
+them — say in the file that it is hand-maintained), and skip the generated view rather than
+hand-writing one.
+An item that needs more than a one-line Description gets a section of its own, under one
+`## Details` heading after the four tables: `### <ID> — <Name>` (the row's Name exactly), then
+free text, written by hand; the Description stays a one-line summary.
 Rows are NEVER deleted: work that will not happen is retired in place (`dropped`, or `cnr` for a
 bug that cannot be reproduced) so every ID ever issued keeps resolving.
 
