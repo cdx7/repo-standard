@@ -33,6 +33,30 @@ solution in the code; a reader of a vendor-derived repo looks for the source-of-
 `docs/reference/`, the divergences in `docs/official/DEVIATIONS.md`, and what is still to be
 asked of the vendor in `docs/official/VENDOR-QUESTIONS.md`.
 
+### One repo, several small projects
+
+A repo may hold several small projects that share one tree because none of them warrants a
+repo of its own: a folder per project, each with its own scripts and its own README, and
+sessions that work on one folder at a time. That is still an **authored** repo, not a third
+archetype: the archetype says where the source of truth is, and this shape changes only how
+many projects share it. What it strains is the context layer, so four conventions carry it,
+all memo and no mechanism (`verify` checks none of them):
+
+- The README's map has one line per folder: what it is, where it stands, where its own README
+  is. A folder's README stays beside its scripts; `docs/official/` is a home, not a mandate.
+- `STATUS` lines and tracker row names start with the folder name, so the maintainer's queue
+  and the tracker's page read as a per-folder board without a column for it.
+- One dated handoff stream at the root, never a HANDOFF file in a folder; each handoff's first
+  line names the folder it worked in. The hooks and the rollover need nothing more.
+- A folder leaves for a repo of its own when it stops being play: when something else depends
+  on it, or someone else uses it. Until then it stays, and the move is a relocation like any
+  other.
+
+Decided 2026-11-03 on the first such repo. The alternative, one project per folder with its
+own homes and hooks, was rejected as ceremony: the Stop hook can scope itself to a project
+inside a larger repo (B111), but several front doors and several trackers in one scratch repo
+is more structure than the work has.
+
 ---
 
 ## The spine (every repo)

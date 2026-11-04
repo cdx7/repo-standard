@@ -2,6 +2,28 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.7.1 — 2026-11-03
+The maintainer's decision while adopting a repo that holds several small projects in one tree:
+such a repo is still authored, not a third archetype, and four conventions carry the shape.
+Docs only: no tool behaviour and no template file changes, so no fleet sync is owed.
+
+- **One repo, several small projects** — `standard/STANDARD.md` gains a subsection under the
+  archetypes and the transfer prompt (section 1) the same rule: a folder per project, each with
+  its own README beside its scripts; the README's map one line per folder; `STATUS` lines and
+  tracker row names starting with the folder name; one dated handoff stream at the root, each
+  handoff's first line naming its folder, never a HANDOFF file in a folder; a folder leaves for
+  a repo of its own when it stops being play. All memo, no mechanism: `verify` checks none of
+  it, and one project per folder with its own homes and hooks was rejected as ceremony.
+- **The look behind it** — the first such repo came to adoption with three per-folder HANDOFF
+  files, each a multi-session log outside the homes, and a two-line front door: the handoffs
+  split into day files with a provenance line each, the tracker's rows and every STATUS line
+  took the folder's name first, and the one folder that had grown into a real tool got its
+  README. The archetype stayed authored throughout; nothing about the slots changed.
+- **Upgrading:** nothing to sync but the stamp; until a repo syncs, `verify` run from this
+  checkout reports that 0.7.1 is available.
+
+The README State section says 0.7.1.
+
 ## 0.7.0 — 2026-10-16
 A vendor-derived repo gets a home for its questions to the vendor, beside the register, and the
 standard now says what to do when the vendor sends a new version of its documents.

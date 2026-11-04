@@ -17,7 +17,8 @@ the ID width, the single-handoff-day rename, one root `z-deprecated/`, and `docs
 as a home rather than a mandate), and again 2026-10-01 (F17, 0.4.0: the register's checkable
 form, `bin/register`, and the guard's second check), and again 2026-10-02 (0.5.0: the
 `REPO-STANDARD.md` notice in every repo), and again 2026-10-16 (F18, 0.7.0: the questions for
-the vendor, and the re-read on a new vendor drop).
+the vendor, and the re-read on a new vendor drop), and again 2026-11-03 (0.7.1: one repo
+holding several small projects, still authored, and its four conventions).
 The hook scripts are deliberately **no longer embedded**:
 two copies already drifted apart; a third copy pasted into prompts drifts worst of all. The
 prompt now describes each hook's contract and says where the canonical script lives.
@@ -70,6 +71,12 @@ Every repo is exactly one of two kinds; name it up front (the standard records i
   When the vendor sends a new version of its documents, re-read every register entry and
   every unanswered question against it.
 An authored repo has none of these homes, and that absence is itself a signal.
+A repo that holds several small projects in one tree (a folder each, with its own README and
+its own sessions) is still AUTHORED, not a third kind. Four conventions carry the shape, none
+enforced: the README's map has one line per folder; STATUS lines and tracker row names start
+with the folder name; one dated handoff stream at the root, each handoff's first line naming
+its folder, never a HANDOFF file in a folder; a folder leaves for a repo of its own when it
+stops being play.
 
 ────────────────────────────────────────
 2) ROOT README — THE FRONT DOOR
