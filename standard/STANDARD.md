@@ -229,6 +229,11 @@ a `core.autocrlf=true` clone otherwise checks them out with CRLF and every hook 
 - `docs/AI/session-handoffs/session-handoff-YYYY-MM-DD-HHMM.md` — local time from
   `date +%Y-%m-%d-%H%M` when the file is written, never typed ahead (the Stop hook dates the
   newest handoff from this name). H1: `# Session handoff — YYYY-MM-DD HH:MM TZ`.
+- A repo may add a label after the time, `session-handoff-YYYY-MM-DD-HHMM-<label>.md` (the
+  checkout it was written in, say: `-main`); a label is letters, digits, `.`, `_` and `-`.
+  Only these names, and a rollover's day files, count as handoffs to the Stop hook: another
+  note kept in the folder, such as a kickoff brief named
+  `session-handoff-YYYY-MM-DD-kickoff-<name>.md`, is never taken as the latest handoff.
 - The current month's handoffs sit at the top level of that directory; past months are archived
   into `YYYYMM/` subdirectories.
 

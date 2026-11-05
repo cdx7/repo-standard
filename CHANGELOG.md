@@ -2,6 +2,41 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.7.3 — 2026-11-05
+One template file changes, the Stop hook, for two fixes; STANDARD.md section 4 gains a bullet
+and the transfer prompt's exit rule is rewritten. Every adopted repo syncs.
+
+- **Fixed (B154): the Stop hook could take the wrong file as the latest handoff, or date it
+  wrongly.** It ranked every `session-handoff-YYYY-MM-DD*.md` name by sorting, and read a time
+  only from a name ending `-HHMM`. An adopted repo that labels each handoff with its checkout,
+  `session-handoff-YYYY-MM-DD-HHMM-main.md`, and keeps kickoff briefs in the same folder,
+  `session-handoff-YYYY-MM-DD-kickoff-<name>.md`, met both halves: a kickoff brief sorted after
+  every timestamped handoff of its day and was taken as the latest, dated by its own older
+  mtime, so the hook asked for a handoff on every stop; and a labelled handoff was dated by its
+  mtime, not its name. Now only handoff-shaped names compete (a day file, `-HHMM`,
+  `-HHMM-<label>`), ranked by the date and time in the name, and the time is the four digits
+  after the date, whatever label follows. One side effect: a day file ranks at noon of its day,
+  as it was already dated, rather than after that day's timestamped handoffs by name; day files
+  appear only after a rollover, where the two do not meet.
+- **Changed (B155): the Stop hook waits two hours, not 30 minutes, before a change makes a
+  handoff due.** The hook runs at the end of every reply, not only at logoff, so a 30-minute
+  grace asked for a handoff after nearly every change in a working session. The logoff is
+  where every change counts, and a hook cannot see it coming, so that check is the session's:
+  the transfer prompt's exit rule (section 7) now reads any change since the last handoff,
+  else one within 12 hours, else write one. Its 30-minute tier is gone, redundant once no
+  change has happened. Section 8 describes the hook's two-hour grace.
+- **STANDARD.md section 4:** a handoff may carry a label after its time,
+  `session-handoff-YYYY-MM-DD-HHMM-<label>.md` (letters, digits, `.`, `_`, `-`); other notes
+  kept in the folder are never taken as the latest handoff.
+- **`tests/stop-hook.sh`** — the Stop hook's first suite: 12 cases (plain, labelled both ways,
+  a same-day kickoff brief, a kickoff brief alone, a stray notes file, day files current and
+  archived, the two-hour grace both ways), each a git repo with one uncommitted edit at a
+  chosen age; 6 fail against 0.7.2's hook. Private, like the other suites.
+- **Upgrading:** `bin/sync <repo>` in every adopted repo, which takes the hook and the stamp;
+  `verify` run from this checkout reports 0.7.3 available until then.
+
+The README State section says 0.7.3.
+
 ## 0.7.2 — 2026-11-04
 One template file changes, one line of its text: the rollover nudge's step 3. Every adopted
 repo syncs.

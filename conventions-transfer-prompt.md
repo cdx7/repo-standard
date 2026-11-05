@@ -18,7 +18,9 @@ as a home rather than a mandate), and again 2026-10-01 (F17, 0.4.0: the register
 form, `bin/register`, and the guard's second check), and again 2026-10-02 (0.5.0: the
 `REPO-STANDARD.md` notice in every repo), and again 2026-10-16 (F18, 0.7.0: the questions for
 the vendor, and the re-read on a new vendor drop), and again 2026-11-03 (0.7.1: one repo
-holding several small projects, still authored, and its four conventions).
+holding several small projects, still authored, and its four conventions), and again
+2026-11-05 (0.7.3: the logoff rule without its 30-minute tier, and the Stop hook's two-hour
+grace).
 The hook scripts are deliberately **no longer embedded**:
 two copies already drifted apart; a third copy pasted into prompts drifts worst of all. The
 prompt now describes each hook's contract and says where the canonical script lives.
@@ -193,18 +195,16 @@ per-clone setting.) The standard's `verify` warns when either is missing.
 7) EXIT HANDOFF CHECK
 ────────────────────────────────────────
 Whenever the user signals they're exiting, ensure the session's work is captured in a handoff
-(format per section 4) BEFORE they leave. In order:
+(format per section 4) BEFORE they leave. First match wins:
+  - ANY file changed since the most recent handoff (sole exception: changes confined to
+    `docs/dev-notes/STATUS`)               -> write a new handoff now
+  - else a handoff within the last 12 HOURS -> good enough; let them exit
+  - else (older, or none)                   -> write one now.
 
-STEP 0 — changed-files override: if ANY file changed since the most recent handoff (sole
-exception: changes confined to `docs/dev-notes/STATUS`), write a new handoff now.
-Otherwise fall through freshness tiers (first match wins):
-  - handoff within the last 30 MINUTES -> already covered; let them exit
-  - else within the last 12 HOURS      -> good enough; let them exit
-  - else (older, or none)              -> write one now.
-
-A handoff whose filename time is later than the clock was stamped ahead: it gets no 30-minute
-grace, and it needs renaming to the time it was really written. And if this session changed
-nothing, say so and let them exit rather than writing a handoff.
+This is the logoff rule. During the session, the Stop hook (section 8) asks for a handoff on
+its own schedule, which is deliberately looser. A handoff whose filename time is later than
+the clock was stamped ahead: it needs renaming to the time it was really written. And if this
+session changed nothing, say so and let them exit rather than writing a handoff.
 
 ────────────────────────────────────────
 8) THE TWO HOOKS (INSTALL FROM THE CANONICAL SOURCE — NOT FROM THIS PROMPT)
@@ -212,7 +212,8 @@ nothing, say so and let them exit rather than writing a handoff.
 The standard automates the two things humans forget, via Claude Code hooks wired in
 `.claude/settings.json` (which is TRACKED, shared machinery; only settings.local.json is
 personal):
-- A Stop hook that nudges (never authors) when a handoff is DUE — 30-minute anti-nag grace
+- A Stop hook that nudges (never authors) when a handoff is DUE. It runs at the end of every
+  reply, not only at logoff, so it is looser than the logoff rule: a 2-hour anti-nag grace
   (none for a handoff named later than the clock), then git-status-based changed-file
   detection (so fresh clones don't false-nag), then the 12h tier; its message lets a session
   that changed nothing say so and stop. Loop-safe, portable, archive-aware.

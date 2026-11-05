@@ -3,7 +3,9 @@
 # deleting this file. sync replaces it from the standard.
 # stop-handoff-check.sh — Claude Code *Stop* hook. Nudges the model to write a
 # session handoff before stopping when one is DUE; otherwise exits 0 (silent).
-# DUE: (1) <=30min since latest handoff -> NOT due (anti-nag grace; none for a handoff
+# The latest handoff: the newest HANDOFF-SHAPED name (B154), session-handoff-YYYY-MM-DD.md,
+# -HHMM.md or -HHMM-<label>.md, dated by that name.
+# DUE: (1) <=2h since latest handoff -> NOT due (anti-nag grace, B155; none for a handoff
 # whose NAME is dated ahead of the clock, B144); (2) else any
 # UNCOMMITTED path (per git status) modified more recently than the latest handoff
 # (excluding dev-notes/STATUS + the handoffs; plain mtime walk in a non-git tree)
@@ -37,7 +39,12 @@ else
             -o -type d -name session-handoffs -not -path '*/example-handoffs/*' -not -path "$root/template/*" -print 2>/dev/null \
           | awk '{ n=gsub(/\//,"/"); print n, $0 }' | sort -k1,1n -k2,2 | head -n1 | cut -d' ' -f2-)"
 fi
-now="$(date +%s)"; GRACE=1800; MAXAGE=43200
+now="$(date +%s)"; MAXAGE=43200
+# The grace is TWO HOURS (B155; 30 minutes before 0.7.3). This hook runs at the end of every
+# reply, not only at logoff, so a short grace asked for a handoff after nearly every change.
+# The logoff itself is the session's call — the exit rule asks for a handoff then whenever
+# anything changed — and a hook cannot see it coming.
+GRACE=7200
 # "YYYY-MM-DD HH:MM" -> epoch, portable across userlands (B53): GNU `date -d`, then BSD
 # `date -j -f`, then the file's mtime via GNU `stat -c` then BSD `stat -f`. The old
 # GNU-only chain collapsed to epoch 0 on BSD/macOS, which made the newest handoff
@@ -51,24 +58,38 @@ to_epoch(){  # $1 = "YYYY-MM-DD HH:MM"; $2 = file whose mtime is the fallback
 }
 newest=""
 if [ -n "$hdir" ]; then
-  # Newest by FILENAME (the names sort chronologically), across the top level AND the
-  # YYYYMM/ archive buckets (B28): right after a month rollover the top level is
-  # legitimately empty, and "no session handoff exists yet" was flatly wrong there.
-  # Only DATE-SHAPED names compete: a stray session-handoff-notes.md would otherwise
-  # sort after every dated name and hijack "newest" forever.
+  # Newest by the date and time IN THE NAME, across the top level AND the YYYYMM/
+  # archive buckets (B28): right after a month rollover the top level is legitimately
+  # empty, and "no session handoff exists yet" was flatly wrong there.
+  # Only HANDOFF-SHAPED names compete (B154): session-handoff-YYYY-MM-DD.md (a day file),
+  # -YYYY-MM-DD-HHMM.md, or -YYYY-MM-DD-HHMM-<label>.md (a repo that tags each handoff
+  # with its checkout, -main, -<feature>). Anything else that merely starts with a date,
+  # a kickoff brief session-handoff-YYYY-MM-DD-kickoff-<name>.md say, is not a handoff:
+  # sorted by name it beat every timestamped handoff of its day ('k' > digits) and was
+  # then dated by its own older mtime, so the hook asked for a handoff on every stop; and
+  # a stray session-handoff-notes.md would sort after every dated name forever. The sort
+  # key is the name's own date and time (a day file at noon, as it is dated below), so
+  # -1320-main and -1321 order by their minutes, not by the label.
   newest="$(ls -1 "$hdir"/session-handoff-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*.md \
                   "$hdir"/[0-9][0-9][0-9][0-9][0-9][0-9]/session-handoff-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*.md 2>/dev/null \
-            | awk -F/ '{ print $NF "\t" $0 }' | sort | tail -n1 | cut -f2-)"
+            | awk -F/ '{ b = $NF
+                if (b !~ /^session-handoff-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9](-[0-9][0-9][0-9][0-9](-[A-Za-z0-9._-]+)?)?\.md$/) next
+                print substr(b, 17, 10) " " (length(b) > 29 ? substr(b, 28, 4) : "1200") "\t" $0 }' \
+            | LC_ALL=C sort | tail -n1 | cut -f2-)"
 fi
 due=0; reason=""; fix=""; future=0
 if [ -z "$newest" ]; then
   due=1; reason="no session handoff exists yet"
 else
   base="$(basename "$newest")"; ts="${base#session-handoff-}"; ts="${ts%.md}"
+  # Only handoff-shaped names get here (the pick above), so the date is the first ten
+  # characters and the time, when there is one, the four after them, whatever label
+  # follows (B154: a -HHMM-main name once failed the parse and fell back to its mtime).
+  datepart="${ts:0:10}"
   case "$ts" in
-    *-[0-9][0-9][0-9][0-9])
-      # Timestamped file: session-handoff-YYYY-MM-DD-HHMM.md
-      datepart="${ts%-*}"; timepart="${ts##*-}"; hh="${timepart:0:2}"; mm="${timepart:2:2}"
+    ????-??-??-[0-9][0-9][0-9][0-9]*)
+      # Timestamped file: session-handoff-YYYY-MM-DD-HHMM.md, or -HHMM-<label>.md
+      timepart="${ts:11:4}"; hh="${timepart:0:2}"; mm="${timepart:2:2}"
       handoff_epoch="$(to_epoch "$datepart $hh:$mm" "$newest")"
       ;;
     *)
@@ -76,7 +97,7 @@ else
       # Its work ended some time that day; noon is the least-wrong fixed point, and it
       # beats the old behavior — a failed parse silently aging by fs mtime, which on a
       # fresh clone is checkout time, i.e. "brand new" (B28).
-      handoff_epoch="$(to_epoch "$ts 12:00" "$newest")"
+      handoff_epoch="$(to_epoch "$datepart 12:00" "$newest")"
       ;;
   esac
   age=$(( now - handoff_epoch ))
@@ -115,7 +136,7 @@ else
       # the case arm below (re-attack on B103).
       # An uncommitted DELETION has no path to stat, so the old loop read m=0 and
       # silently skipped it — a deletion-only session never marked a handoff DUE
-      # inside the 30min–12h window (B103). Proxy: walk up to the nearest SURVIVING
+      # between the grace and 12h (B103). Proxy: walk up to the nearest SURVIVING
       # ancestor and use ITS mtime — POSIX guarantees unlink updates the parent
       # dir's mtime, so a fresh deletion reads newer-than-handoff while a stale one
       # in a quiet tree stays silent. Accepted over-sensitivity: unrelated churn in
