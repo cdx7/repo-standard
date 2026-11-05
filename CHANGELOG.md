@@ -2,6 +2,32 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.7.2 — 2026-11-04
+One template file changes, one line of its text: the rollover nudge's step 3. Every adopted
+repo syncs.
+
+- **Fixed (B153): the rollover nudge's step 3 filter dropped nothing under Claude Code's
+  grep.** The nudge told the session to find the living docs that cite a prior-month handoff
+  with `grep -rn … | grep -v ^./<handoffs dir>/`, a filter anchored on the `./` prefix that GNU
+  `grep -r` prints. In Claude Code's shell, `grep` is a function that runs the Claude binary as
+  ugrep, which prints no `./`, so the filter kept every hit, the handoffs' mentions of each
+  other included, and the repoint list was wrong in every adopted repo (first seen at an
+  adopted repo's October rollover, 2026-11-03). The unquoted form also broke on a handoffs
+  path with a space. The filter now matches the path field with and without the prefix,
+  `grep -v -e '^./<dir>/' -e '^<dir>/'`, single-quoted. It carries no backslash and no `-E`
+  on purpose: the message is hand-built JSON, where `\.` is an invalid escape and the nudge
+  would never arrive, and `-E` would let a `+` or `(` in the path disable the filter. Scripts
+  never saw the bug: the function is not exported, so the hook and the tools run GNU grep.
+- **`tests/rollover-hook.sh`** — the first suite for a hook: the nudge parses as JSON and is
+  silent for the current month; its step 3 command finds the living docs and none of the
+  handoffs under GNU grep and under ugrep (the Claude binary, run the way the shell function
+  runs it), with the pre-fix filter as the control; a handoffs path with a space and
+  parentheses too. Private, like the other suites.
+- **Upgrading:** `bin/sync <repo>` in every adopted repo, which takes the hook and the stamp;
+  `verify` run from this checkout reports 0.7.2 available until then.
+
+The README State section says 0.7.2.
+
 ## 0.7.1 — 2026-11-03
 The maintainer's decision while adopting a repo that holds several small projects in one tree:
 such a repo is still authored, not a third archetype, and four conventions carry the shape.
