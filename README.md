@@ -18,7 +18,7 @@ repo, checks a repo against it, and keeps the shared parts current.
 - **[`conventions-transfer-prompt.md`](conventions-transfer-prompt.md)** — the conventions as a
   prompt, for when the toolkit is out of reach.
 
-## State — v0.7.3
+## State — v0.8.0
 Built and in use. The release history, from the first public release on, is in
 [`CHANGELOG.md`](CHANGELOG.md).
 

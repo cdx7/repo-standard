@@ -2,6 +2,39 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.8.0 — 2026-11-06
+A repo can now add pre-commit checks of its own. Two managed files change, the commit guard
+and the `REPO-STANDARD.md` notice; `init` and `verify` learn the new folder. Every adopted repo
+syncs; nothing changes for a repo until it adds a check.
+
+- **Added (F19): `.githooks/pre-commit.d/`, the repo's own pre-commit checks.** The guard
+  (`.githooks/pre-commit`) is a managed file, replaced on every update, so a repo had nowhere
+  to put a check of its own. Now, after the standard's checks, the guard runs every executable
+  file in that folder whose name is only letters, digits, `_` and `-`, in C name order (taken
+  under `LC_ALL=C`, so the locale never reorders them), from the repo root, on every commit.
+  Any that exits nonzero blocks the commit and is named; all of them run, so one attempt shows
+  every refusal. Other names (`*.sample`, `foo~`, `README.md`) are not run; a run-able name
+  without the exec bit is reported and not run. `init` and `sync` never write into the folder.
+  The guard used to exit at once when no tracker or register file was staged; that exit now
+  skips only the standard's checks.
+- **`verify`** lists the repo's checks in run order and warns on one that cannot run: no exec
+  bit, committed without it, or not pinned to LF.
+- **`.gitattributes`:** the skeleton and the block `init` appends gain
+  `.githooks/pre-commit.d/* text eol=lf`, since `.githooks/*` does not reach into a
+  subfolder. `sync` does not manage `.gitattributes`, so a repo adopted earlier adds the line
+  with its first check; `verify` warns until it does.
+- **Docs:** STANDARD.md section 6 and its `.gitattributes` slot, the `REPO-STANDARD.md`
+  notice, and the transfer prompt describe the folder.
+- **`tests/pre-commit-checks.sh`** — 22 cases (one check passing and one refusing, several in
+  C order under a dictionary-order `LC_ALL`, the names that are not run, a check without the
+  exec bit, a check reading the index, a commit from a subfolder, the tracker check still
+  blocking beside them, and `verify`'s listing and three warnings); 12 fail against 0.7.3's
+  hook. Private, like the other suites.
+- **Upgrading:** `bin/sync <repo>` in every adopted repo, which takes the guard, the notice
+  and the stamp; `verify` run from this checkout reports 0.8.0 available until then.
+
+The README State section says 0.8.0.
+
 ## 0.7.3 — 2026-11-05
 One template file changes, the Stop hook, for two fixes; STANDARD.md section 4 gains a bullet
 and the transfer prompt's exit rule is rewritten. Every adopted repo syncs.

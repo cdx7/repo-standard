@@ -3,6 +3,8 @@
 # standard's scripts; set your own policy for the rest of the repo as you see fit.
 .claude/hooks/* text eol=lf
 .githooks/* text eol=lf
+# The repo's own pre-commit checks (F19): .githooks/* does not reach into a subfolder.
+.githooks/pre-commit.d/* text eol=lf
 bin/track text eol=lf
 bin/register text eol=lf
 # The tracker-hwm sidecar is data, not a script, but a CRLF checkout used to zero its

@@ -588,6 +588,34 @@ if [ "$IS_GIT" = 1 ]; then
 else
   skip "not a git repo — committed exec modes cannot be checked"
 fi
+# The repo's OWN pre-commit checks (F19): optional, never required, never compared with
+# the standard. Listed in the order the guard runs them (C collation). Names other than
+# letters, digits, _ and - are not run by design (*.sample, foo~, README.md) and pass
+# silently; a run-able name that cannot run is the switched-off check nobody notices.
+if [ -d .githooks/pre-commit.d ] && [ -f .githooks/pre-commit ]; then
+  runs=()
+  # The glob in C order, the guard's run order: a subshell under LC_ALL=C, NUL-separated.
+  chks=()
+  while IFS= read -r -d '' c; do chks+=("$c"); done \
+    < <(LC_ALL=C; for c in .githooks/pre-commit.d/*; do printf '%s\0' "$c"; done)
+  for chk in "${chks[@]}"; do
+    [ -e "$chk" ] || continue
+    name="${chk##*/}"
+    case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
+    if [ ! -f "$chk" ] || [ ! -x "$chk" ]; then
+      warn "$chk is not an executable file — the commit guard reports it and does not run it (chmod +x $chk)"; continue
+    fi
+    if [ "$IS_GIT" = 1 ]; then
+      mode="$(git ls-files -s -- "$chk" 2>/dev/null | awk '{print $1; exit}')"
+      [ "$mode" = "100644" ] && warn "$chk is committed WITHOUT the exec bit — every clone gets it switched off (git update-index --chmod=+x $chk)"
+      eol="$(git check-attr eol -- "$chk" 2>/dev/null | awk '{print $NF}')"
+      [ "$eol" = "lf" ] || warn "$chk is not pinned to LF — a CRLF checkout breaks its shebang: add '.githooks/pre-commit.d/* text eol=lf' to .gitattributes"
+    fi
+    runs+=("$name")
+  done
+  if [ "${#runs[@]}" -gt 0 ]; then pass "the repo's own pre-commit checks (.githooks/pre-commit.d/), in run order: ${runs[*]}"
+  else pass ".githooks/pre-commit.d/ holds no check to run"; fi
+fi
 
 # --- managed files --------------------------------------------------------------
 # The files sync owns (decided 2026-10-02, REPO-STANDARD.md Q3): a repo must run the

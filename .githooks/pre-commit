@@ -16,6 +16,13 @@
 # (`track render` derives the page title from tracker.md's own H1, so rendering the
 # extracted copy under /tmp is byte-identical to rendering it in place.)
 #
+# The repo's OWN checks (F19) go in .githooks/pre-commit.d/, never in this file: after the
+# standard's checks, every executable file there whose name is only letters, digits, _ and
+# - runs in name order (C collation), from the repo root, with the commit's index as git
+# set it up. Any that exits nonzero blocks the commit; all of them run, so one attempt shows
+# every refusal. Other names (*.sample, foo~, README.md) are not run; a file with a run-able
+# name but no exec bit is reported and not run. sync never touches the folder.
+#
 # Enable once per clone (from repo root):  git config core.hooksPath .githooks
 set -euo pipefail
 
@@ -31,13 +38,14 @@ while IFS= read -r -d '' p; do
   case "$p" in tracker.md|*/tracker.md) staged+=("$p") ;; esac
   [ "$p" = docs/official/DEVIATIONS.md ] && reg=1
 done < <(git diff --cached --name-only -z --diff-filter=ACMR 2>/dev/null)
-[ "${#staged[@]}" -gt 0 ] || [ "$reg" = 1 ] || exit 0
-
-tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+# Nothing of the standard's is staged: its checks have nothing to do, but the repo's own
+# checks below still run on every commit (F19), so no early exit here.
 rc=0
+std=0; { [ "${#staged[@]}" -gt 0 ] || [ "$reg" = 1 ]; } && std=1
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
 # ── the tracker ───────────────────────────────────────────────────────────────────────
-if [ "${#staged[@]}" -gt 0 ]; then
+if [ "$std" = 1 ] && [ "${#staged[@]}" -gt 0 ]; then
 
 # A clone with core.symlinks=false (Windows default) materializes a committed symlink
 # as a text file holding the link target — bin/track then "exists" but cannot run, and
@@ -110,7 +118,7 @@ fi
 # compared (spec Q5): a commit that only moves a citation never blocks here. A register
 # not yet in the entry form (no marker) passes: `check` says so and exits 0. An authored
 # repo never stages docs/official/DEVIATIONS.md, so this block never runs there.
-if [ "$reg" = 1 ]; then
+if [ "$std" = 1 ] && [ "$reg" = 1 ]; then
   md=docs/official/DEVIATIONS.md html=docs/official/DEVIATIONS.html
   if [ ! -f ./bin/register ] || [ ! -x ./bin/register ]; then
     echo "pre-commit: ./bin/register missing or not executable — skipping the register check." >&2
@@ -140,6 +148,30 @@ if [ "$reg" = 1 ]; then
       esac
     fi
   fi
+fi
+
+# ── the repo's own checks (F19) ──────────────────────────────────────────────────────
+# The glob's order is the run order, and it must not change with the locale: it is taken in a
+# subshell under LC_ALL=C (LC_ALL outranks LC_COLLATE), NUL-separated, so the checks
+# themselves still run in the caller's locale.
+if [ -d .githooks/pre-commit.d ]; then
+  chks=()
+  while IFS= read -r -d '' c; do chks+=("$c"); done \
+    < <(LC_ALL=C; for c in .githooks/pre-commit.d/*; do printf '%s\0' "$c"; done)
+  for chk in "${chks[@]}"; do
+    [ -e "$chk" ] || continue
+    name="${chk##*/}"
+    case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
+    if [ ! -f "$chk" ] || [ ! -x "$chk" ]; then
+      echo "pre-commit: $chk is not an executable file, so it was not run (chmod +x it to enable it)" >&2
+      continue
+    fi
+    st=0; "./$chk" || st=$?
+    if [ "$st" != 0 ]; then
+      echo "commit blocked by this repo's own check $chk (exit $st)" >&2
+      rc=1
+    fi
+  done
 fi
 
 exit $rc

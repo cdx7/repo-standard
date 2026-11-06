@@ -631,7 +631,7 @@ elif [ ! -f "$TARGET/.gitattributes" ]; then
   printf '  skip  %-16s %s (exists but is not a regular file — pin the machinery to eol=lf yourself)\n' "$(sect_of ".gitattributes")" ".gitattributes"
   skipped=$((skipped+1))
 elif ! attr_covered "$TARGET/.gitattributes"; then
-  if printf '\n# repo-standard machinery must stay LF — a CRLF checkout breaks the shebang (exit 127).\n.claude/hooks/* text eol=lf\n.githooks/* text eol=lf\nbin/track text eol=lf\nbin/register text eol=lf\n' \
+  if printf '\n# repo-standard machinery must stay LF — a CRLF checkout breaks the shebang (exit 127).\n.claude/hooks/* text eol=lf\n.githooks/* text eol=lf\n.githooks/pre-commit.d/* text eol=lf\nbin/track text eol=lf\nbin/register text eol=lf\n' \
        2>/dev/null >> "$TARGET/.gitattributes"; then
     printf '  amend %-16s %s (+ machinery eol=lf block)\n' "$(sect_of ".gitattributes")" ".gitattributes"; added=$((added+1))
   else

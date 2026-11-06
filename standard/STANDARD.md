@@ -215,11 +215,13 @@ a `core.autocrlf=true` clone otherwise checks them out with CRLF and every hook 
 
 - `init` therefore maintains a `.gitattributes` slot under the same contract as the
   `.gitignore` slot: it creates a targeted block pinning only the machinery (`.claude/hooks/*`,
-  `.githooks/*`, `bin/track`, `bin/register` → `text eol=lf`) when the file is absent, appends
-  that block when one exists but nothing covers the machinery, and never rewrites attributes
-  you authored.
+  `.githooks/*`, `.githooks/pre-commit.d/*`, `bin/track`, `bin/register` → `text eol=lf`) when
+  the file is absent, appends that block when one exists but nothing covers the machinery, and
+  never rewrites attributes you authored.
 - `sync` does not manage this file, so a vendor-derived repo adopted before 0.4.0 adds the
-  `bin/register` line by hand.
+  `bin/register` line by hand, and a repo adopted before 0.8.0 adds
+  `.githooks/pre-commit.d/* text eol=lf` when it adds its first check (`verify` warns until
+  it does; `.githooks/*` does not reach into the subfolder).
 - The repo's own line-ending policy for everything else stays yours.
 
 ### 4. Session handoffs
@@ -323,6 +325,21 @@ is stale relative to `docs/official/DEVIATIONS.md` (see **The register** below).
 each pair as staged, not as in the worktree. Enabled per clone with
 `git config core.hooksPath .githooks`.
 
+**The repo's own checks** go in `.githooks/pre-commit.d/`, never in `pre-commit` itself (a
+managed file, replaced by `sync`):
+
+- After the standard's checks, the guard runs every executable file in that folder whose name
+  is only letters, digits, `_` and `-`, in name order (C collation, so `10-lint` before
+  `20-test`), from the repo root, on every commit. Each sees the commit's index as git set it
+  up (`git diff --cached` lists what is being committed).
+- Any check that exits nonzero blocks the commit, and the guard names it. All of them run, so
+  one attempt shows every refusal.
+- Other names (`*.sample`, `foo~`, `README.md`) are not run, so a folder can hold notes and
+  switched-off examples. A file with a run-able name but no exec bit is reported and not run.
+- The folder is the repo's own: `init` and `sync` never write into it, and `verify` lists the
+  checks in run order and warns on one that cannot run (no exec bit in the worktree or in the
+  index, or not pinned to LF).
+
 **Why.** Auto-render on mutation covers the CLI path; the pre-commit covers the hand-edit path,
 so the committed view can never silently drift from its source. A hook that isn't executable is
 silently ignored by git — a disarmed guard is worse than none, because it looks safe.
@@ -331,7 +348,8 @@ silently ignored by git — a disarmed guard is worse than none, because it look
 
 - `init` stamps it executable.
 - `sync` restores the exec bit if it's ever lost.
-- `verify` warns if the hook is non-executable or `core.hooksPath` isn't wired.
+- `verify` warns if the hook is non-executable or `core.hooksPath` isn't wired, and on a check
+  in `.githooks/pre-commit.d/` that cannot run.
 
 ### 7. Numbered-prefix ordering
 

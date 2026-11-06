@@ -20,7 +20,8 @@ form, `bin/register`, and the guard's second check), and again 2026-10-02 (0.5.0
 the vendor, and the re-read on a new vendor drop), and again 2026-11-03 (0.7.1: one repo
 holding several small projects, still authored, and its four conventions), and again
 2026-11-05 (0.7.3: the logoff rule without its 30-minute tier, and the Stop hook's two-hour
-grace).
+grace), and again 2026-11-06 (F19, 0.8.0: the repo's own pre-commit checks in
+`.githooks/pre-commit.d/`).
 The hook scripts are deliberately **no longer embedded**:
 two copies already drifted apart; a third copy pasted into prompts drifts worst of all. The
 prompt now describes each hook's contract and says where the canonical script lives.
@@ -156,7 +157,10 @@ Testing. Every row: a status, a stable ID (B/F/D/T prefix, zero-padded to at lea
 Created date, a Status-Changed date. The standard maintains this with a `track` CLI (`add`,
 `set-status`, `render` → an interactive `tracker.html` view; `history` → an item's history
 from git) plus a pre-commit guard that blocks any commit whose rendered view is stale against
-the staged tracker.md. If you cannot get the tooling: keep the same single file and table
+the staged tracker.md. The repo's own pre-commit checks never go in that hook (an update
+replaces it): they go in `.githooks/pre-commit.d/`, where the guard runs each executable file
+whose name is only letters, digits, `_` and `-`, in C name order, from the repo root, on every
+commit; any nonzero exit blocks the commit, and all of them run. If you cannot get the tooling: keep the same single file and table
 shape by hand, maintain IDs and dates scrupulously (they are only trustworthy when a tool sets
 them — say in the file that it is hand-maintained), and skip the generated view rather than
 hand-writing one.
@@ -182,9 +186,9 @@ Two repo-local protections travel with the repo, not the machine:
   be a regular file: git 2.32+ never reads a symlinked `.gitignore` (or `.gitattributes`), so a
   stow-style link protects nothing whatever it carries.
 - `.gitattributes` must pin the shipped shell machinery to LF (`.claude/hooks/* text eol=lf`,
-  `.githooks/* text eol=lf`, `bin/track text eol=lf`, and `bin/register text eol=lf` in a
-  vendor-derived repo): a `core.autocrlf=true` clone otherwise materializes hooks whose `\r`'d
-  shebang dies exit 127.
+  `.githooks/* text eol=lf`, `.githooks/pre-commit.d/* text eol=lf`, `bin/track text eol=lf`,
+  and `bin/register text eol=lf` in a vendor-derived repo): a `core.autocrlf=true` clone
+  otherwise materializes hooks whose `\r`'d shebang dies exit 127.
 
 One setting does NOT travel and is set per clone, by hand: `git config tag.sort version:refname`,
 so `git tag` lists versions in order — plain git sorts tag names as strings and files `v0.3.10`

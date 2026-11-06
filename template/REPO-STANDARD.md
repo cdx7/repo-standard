@@ -29,7 +29,7 @@ Which version this repo follows, and its kind, are on the first line of
   `render`, `map` and `history` for `docs/official/DEVIATIONS.md`.
 - `.githooks/pre-commit` — refuses a commit whose generated page is out of date against its
   staged source: `tracker.html`, and in a vendor-derived repo the register's summary and
-  `DEVIATIONS.html`.
+  `DEVIATIONS.html`. Then it runs this repo's own checks (below).
 - `.claude/hooks/stop-handoff-check.sh` — Claude Code hook: when a session ends, asks for a
   session handoff if one is due.
 - `.claude/hooks/session-start-rollover-check.sh` — Claude Code hook: when a session starts,
@@ -39,6 +39,12 @@ Which version this repo follows, and its kind, are on the first line of
 An update from the standard replaces these files, so a local edit is lost. Deleting one
 disarms a check quietly: once `bin/track` is gone, for instance, the commit guard stops
 checking the tracker, and says so only in passing.
+
+**Your own pre-commit checks** go in `.githooks/pre-commit.d/`, a folder that is yours: an
+update never writes into it. Each executable file there whose name is only letters, digits,
+`_` and `-` runs on every commit, in name order (`10-lint` before `20-test`), from the repo
+root; one that exits nonzero blocks the commit. Other names (`*.sample`, `README.md`) are not
+run. Pin the folder to LF in `.gitattributes`: `.githooks/pre-commit.d/* text eol=lf`.
 
 **`.claude/settings.json`** is the one shared file you may extend. Your own keys are kept
 when it is updated, but its `hooks` block must stay, or the two hooks above never run.
