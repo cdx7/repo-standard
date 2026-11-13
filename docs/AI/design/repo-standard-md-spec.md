@@ -6,6 +6,9 @@ one is the maintainer's call. Built so far (2026-10-02, 0.5.0 slice 2): the file
 section; slice 4: the docs (STANDARD.md, the transfer prompt, the README, the CHANGELOG). Not
 yet: the 0.5.0 release.*
 
+*Since 0.9.0 (written 2026-11-13): the fixed names follow the tracker and `STATUS.md` to
+`docs/tracking/`, and the file has two more sections, "Who writes what" and "STATUS" (§ 2).*
+
 - **The problem** (the maintainer, 2026-10-01): an adopted repo shows the standard's
   fingerprints everywhere (`bin/`, `.githooks/`, `.claude/hooks/`, the fixed `docs/` homes,
   comment lines in `.gitattributes`), but nothing in it says what the standard is. A reader
@@ -52,13 +55,25 @@ maintainer's review.
   `sync`, but its hooks block must stay, or the two hooks never run.
 - **What each managed file does,** one line each.
 - **Fixed names: do not rename or restructure.** `docs/official/`, `docs/AI/`,
-  `docs/AI/session-handoffs/`, `docs/dev-notes/` (`STATUS`, `tracker.md`, `tracker.html`),
+  `docs/AI/session-handoffs/`, `docs/tracking/` (`STATUS.md`, `tracker.md`, `tracker.html`,
+  `tracker-hwm`), `docs/dev-notes/` (the maintainers' own notes, made on first use),
   `docs/reference/` and `docs/official/DEVIATIONS.md` in a vendor-derived repo (and, from
   0.7.0, `docs/official/VENDOR-QUESTIONS.md`), and `bin/` at the root. The hooks and tools find
-  them by these names.
-- **Yours to write:** the README, `CLAUDE.md`, `STATUS`, the tracker's rows (through
-  `bin/track`), the register's entries, everything in `docs/`. The lines the standard needs in
-  `.gitignore` and `.gitattributes` stay; the rest of those files is yours.
+  them by these names. Until 0.9.0 the tracker and `STATUS` were in `docs/dev-notes/`.
+- **Yours to write:** the README, `CLAUDE.md`, the tracker's rows (through `bin/track`), the
+  register's entries, everything in `docs/`. The lines the standard needs in `.gitignore` and
+  `.gitattributes` stay; the rest of those files is yours.
+- **Who writes what** (from 0.9.0). A session works beside the people who maintain the repo,
+  and six rules say who changes what: `docs/dev-notes/` is the maintainers' own; the session
+  keeps `docs/tracking/STATUS.md` true, at each handoff and each change of a tracker row's
+  status, in the same commit; everything else in STATUS is the maintainers'; a commit or a
+  push waits for a go, with what changed shown first; before a maintainer leaves, the session
+  writes a handoff if anything changed; a handoff says nothing about its own commit. They are
+  in this file because it is the one text of the standard that every adopted repo has:
+  STANDARD.md does not travel, and the paragraph `init` stamps into `CLAUDE.md` points here.
+- **STATUS** (from 0.9.0): what `STATUS.md` is (20 to 30 lines of pointers), its three
+  sections, the form of an item, and when an item carries a pointer to a handoff. The comment
+  at the bottom of the STATUS skeleton points at this section.
 - **Generated, never hand-edited:** `tracker.html`, and in a vendor-derived repo
   `DEVIATIONS.html` and the register's summary block.
 - **Two settings each clone needs:** `git config core.hooksPath .githooks` and
@@ -111,7 +126,9 @@ Flip suite in the session scratchpad, against the previous release's tools:
   no tags, and does not flag a customized `settings.json`.
 - `init`'s re-run on its own scaffold is still recognised.
 - Each pointer line is present in the synced scripts.
-- The file renders through both Markdown engines, with every list flat.
+- The file renders through both Markdown engines, with every list flat. (Since 0.9.0 one list
+  is nested, the parts of an item in the STATUS section; it was checked with `cmark-gfm`
+  only.)
 
 ## 5. Questions (all decided by 2026-10-02)
 
@@ -124,7 +141,8 @@ Flip suite in the session scratchpad, against the previous release's tools:
   names the public repository, `cdx7/repo-standard`, and its URL, with no private-repo
   sentence. Its wording no longer assumes a single maintainer: the opening, and
   `docs/dev-notes/` as "the working notes of the people who maintain this repo" (the
-  maintainer: "go, the three changes read right").
+  maintainer: "go, the three changes read right"). The words stand; since 0.9.0 that folder
+  holds only those notes (§ 2).
 - **Q3. `verify`: presence only, or content too? Decided 2026-10-02:** content, for every
   managed file but `settings.json` (§ 3). The maintainer: "it needs to check content as well,
   since it is part of the standard effectively", then "go, check content of all managed

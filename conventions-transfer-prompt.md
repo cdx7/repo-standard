@@ -21,7 +21,9 @@ the vendor, and the re-read on a new vendor drop), and again 2026-11-03 (0.7.1: 
 holding several small projects, still authored, and its four conventions), and again
 2026-11-05 (0.7.3: the logoff rule without its 30-minute tier, and the Stop hook's two-hour
 grace), and again 2026-11-06 (F19, 0.8.0: the repo's own pre-commit checks in
-`.githooks/pre-commit.d/`).
+`.githooks/pre-commit.d/`), and again 2026-11-13 (F21, F22 and D53, 0.9.0: `docs/tracking/`
+as the home of the tracker and `STATUS.md`, STATUS's three sections and its item line, who
+writes what, and the handoff that says nothing about its own commit).
 The hook scripts are deliberately **no longer embedded**:
 two copies already drifted apart; a third copy pasted into prompts drifts worst of all. The
 prompt now describes each hook's contract and says where the canonical script lives.
@@ -76,7 +78,7 @@ Every repo is exactly one of two kinds; name it up front (the standard records i
 An authored repo has none of these homes, and that absence is itself a signal.
 A repo that holds several small projects in one tree (a folder each, with its own README and
 its own sessions) is still AUTHORED, not a third kind. Four conventions carry the shape, none
-enforced: the README's map has one line per folder; STATUS lines and tracker row names start
+enforced: the README's map has one line per folder; STATUS items and tracker row names start
 with the folder name; one dated handoff stream at the root, each handoff's first line naming
 its folder, never a HANDOFF file in a folder; a folder leaves for a repo of its own when it
 stops being play.
@@ -95,7 +97,7 @@ that name. If the repo already has a front door under another spelling (`README`
 ────────────────────────────────────────
 3) DOCS STRUCTURE
 ────────────────────────────────────────
-Under the docs root (create `docs/` at the repo root if none exists), four fixed homes:
+Under the docs root (create `docs/` at the repo root if none exists), five fixed homes:
 
 - `docs/official/`  — end-user documentation YOU (the humans) authored. A home, not a
                       mandate: a deliverable already at the root and mapped from the
@@ -105,14 +107,34 @@ Under the docs root (create `docs/` at the repo root if none exists), four fixed
                       when it is done.
 - `docs/AI/`        — Claude's durable output: session handoffs, audits, notes, design docs.
                       NOT for routine/ephemeral runs. Create subdirs on first use.
-- `docs/dev-notes/` — the USER'S working notes: a `STATUS` file (their personal "where am
-                      I?") plus the work tracker (section 5). Do NOT overwrite or
-                      restructure these unless explicitly asked. One exception: an
-                      empty STATUS skeleton the tooling just created may be filled
-                      once, from the repo's own record. A STATUS the user wrote is
-                      append-only (a dated pointer to your handoff); any judgment
-                      about their queue goes in that handoff, not in STATUS.
+- `docs/tracking/`  — where work stands: `STATUS.md` (below) and the work tracker
+                      (section 5).
+- `docs/dev-notes/` — the USER'S own working notes, created on first use. Do NOT write
+                      here unless explicitly asked.
 - `docs/assets/`    — images/binaries that docs embed, created on first use.
+
+STATUS: `docs/tracking/STATUS.md` is orientation, not history — 20 to 30 lines of pointers,
+in three sections under the H1 `# WHERE AM I?`. The sections keep their headings even when
+empty:
+- `## NOW` — only what is current, blocked work included. Finished work leaves for the
+  handoffs.
+- `## NEXT` — tracker rows, in order, at most five.
+- `## EVENTUALLY` — ideas that have no row yet. One that gets a row leaves.
+An item reads `<folder>: <ID>, <ID> · <status> · <words>`:
+- the folder only in a repo that holds several projects;
+- rows that share an item share a status, and work with no row carries a short name in the
+  rows' place;
+- the status is the row's own, in the tracker's word (`open`, `in-progress` and so on), and
+  a blocked item says `BLOCKED on <whom or what>`;
+- then free words: what it is, and what picks it back up.
+An item ends with a pointer to a handoff only when the newest handoff does not cover it:
+`handoff YYYY-MM-DD-HHMM`, the stamp from the file's name, never a path. STATUS never points
+at the newest handoff — every new handoff would leave that pointer behind. When such an item
+moves: write the handoff, repoint STATUS, and commit both together.
+KEEP STATUS TRUE YOURSELF: whenever you write a handoff or change a tracker row's status,
+check STATUS, change only what is no longer true, and put that in the same commit.
+Everything else in STATUS — what is in the queue, and in what order — is the user's: ask
+first.
 
 Moving existing material into a home is a RELOCATION: relative links inside the moved files,
 and every script, config or doc naming the old path, break — and no check sees it. Grep for
@@ -133,6 +155,9 @@ Session handoffs (your continuity notes for the next session) go in
 - A handoff captures ONLY what is not already in git or the READMEs: focus, what changed,
   decisions and their why, results/verdicts, next concrete steps, traps. Write it to be
   resumed from.
+- A handoff says NOTHING about its own commit. It is written before that commit, so do not
+  list what is uncommitted or write that the commit waits for a go: `git status` shows that,
+  and such a line is out of date the moment the commit lands.
 - The CURRENT month's handoffs sit at the top level; PAST months are archived into `YYYYMM/`
   subdirectories. At the first session of a new month, roll the prior month over:
   1. mkdir the `YYYYMM/` bucket and `git mv` that month's files in (git mv, not a bare mv,
@@ -151,7 +176,7 @@ Session handoffs (your continuity notes for the next session) go in
 ────────────────────────────────────────
 5) WORK TRACKER
 ────────────────────────────────────────
-One file, `docs/dev-notes/tracker.md`, four categories — Bugs / Features / Documentation /
+One file, `docs/tracking/tracker.md`, four categories — Bugs / Features / Documentation /
 Testing. Every row: a status, a stable ID (B/F/D/T prefix, zero-padded to at least two digits
 — B01, F15, B142 — with unpadded nesting like F12.2.1; cite IDs as the tool prints them), a
 Created date, a Status-Changed date. The standard maintains this with a `track` CLI (`add`,
@@ -176,7 +201,8 @@ bug that cannot be reproduced) so every ID ever issued keeps resolving.
 Everything durable is version-controlled — code, official docs, AND the docs/AI/ artifacts.
 A durable file that isn't committed is effectively lost to the next session. But this is NOT
 standing permission to commit: get an explicit go-ahead from the user immediately before the
-actual `git commit` / `git push`, every time.
+actual `git commit` / `git push`, every time. Show what changed first, and STATUS's diff above
+all: you edit that file yourself (section 3).
 
 Two repo-local protections travel with the repo, not the machine:
 - `.gitignore` must carry `.claude/settings.local.json*` (personal Claude permissions and the
@@ -201,7 +227,7 @@ per-clone setting.) The standard's `verify` warns when either is missing.
 Whenever the user signals they're exiting, ensure the session's work is captured in a handoff
 (format per section 4) BEFORE they leave. First match wins:
   - ANY file changed since the most recent handoff (sole exception: changes confined to
-    `docs/dev-notes/STATUS`)               -> write a new handoff now
+    `docs/tracking/STATUS.md`)             -> write a new handoff now
   - else a handoff within the last 12 HOURS -> good enough; let them exit
   - else (older, or none)                   -> write one now.
 
@@ -220,15 +246,23 @@ personal):
   reply, not only at logoff, so it is looser than the logoff rule: a 2-hour anti-nag grace
   (none for a handoff named later than the clock), then git-status-based changed-file
   detection (so fresh clones don't false-nag), then the 12h tier; its message lets a session
-  that changed nothing say so and stop. Loop-safe, portable, archive-aware.
+  that changed nothing say so and stop. The message also carries two rules for that moment:
+  the handoff says nothing about its own commit, and, where `docs/tracking/STATUS.md`
+  exists, STATUS is checked and only what is no longer true is changed, in the same commit.
+  A change to STATUS.md alone does not count as a changed file. Loop-safe, portable,
+  archive-aware.
 - A SessionStart hook that detects un-rolled prior months and injects the full rollover
   procedure as context — detect + nudge only; the model does the rollover.
 
 Beside the hooks, every repo has a root `CLAUDE.md`, which Claude Code loads in full at the
-start of every session: standing instructions only, never session state. It may be nothing but
-the statement that all Claude directives for the repo are in `CLAUDE.local.md` (personal, loaded
-after it, never committed). When none exists, the standard's `init` stamps a minimal one that
-says personal directives, if any, go in `CLAUDE.local.md`, without claiming the file exists.
+start of every session: standing instructions only, never session state. The smallest one is
+two paragraphs. The first says where work stands (`docs/tracking/STATUS.md` and the
+handoffs), to keep STATUS true (check it whenever you write a handoff or change a tracker
+row's status), and that who writes what is in `REPO-STANDARD.md`, to be read before the first
+change. The second points at `CLAUDE.local.md` (personal, loaded after it, never committed)
+and may say that every other Claude directive for the repo is there. When no `CLAUDE.md`
+exists, the standard's `init` stamps these two paragraphs; its second says personal
+directives, if any, go in `CLAUDE.local.md`, without claiming the file exists.
 Subfolders may carry their own `CLAUDE.md` under the same rule: standing instructions only.
 
 Earlier revisions of this prompt embedded both scripts inline; they drifted from the canon
@@ -241,8 +275,9 @@ plus `template/bin/register` in a vendor-derived repo (the guard's second check,
 register, runs through it), and `template/REPO-STANDARD.md` — by running its
 `bin/init`/`bin/sync`, or by copying those files verbatim (then `chmod +x` the scripts and
 `git config core.hooksPath .githooks`). `REPO-STANDARD.md` goes at the repo root: the
-standard's notice, the same text in every repo, saying which files are managed and which names
-must not change. Never edit it locally; an update replaces it. If the repo is truly
+standard's notice, the same text in every repo, saying which files are managed, which names
+must not change, who writes what, and how STATUS is kept. Never edit it locally; an update
+replaces it. If the repo is truly
 unreachable, implement the contracts described above from scratch rather than resurrecting any
 older pasted copy you may find — the older copies contain known, fixed bugs.
 
@@ -260,8 +295,8 @@ No tool checks either — they are judgment calls, and this prompt is their only
 
 ────────────────────────────────────────
 Once you've read this, save these conventions to your persistent memory (one fact per memory
-if your memory system works that way: archetype + front door, docs structure, handoff format
-+ month rollover, tracker, VCS default + commit gate, exit handoff check, hooks-from-canon
-+ CLAUDE.md, numbered prefixes + z-deprecated),
+if your memory system works that way: archetype + front door, docs structure + STATUS,
+handoff format + month rollover, tracker, VCS default + commit gate, exit handoff check,
+hooks-from-canon + CLAUDE.md, numbered prefixes + z-deprecated),
 and confirm back to me which conventions you've recorded.
 ````

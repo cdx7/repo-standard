@@ -64,16 +64,49 @@ fi
 # When the repo HAS a bin/track that isn't usable, say so (B78) — silently substituting
 # the template's renderer turns "chmod +x bin/track" into an unsolvable "stale tracker".
 # [ -x dir ] is TRUE for a searchable directory (B97), so require a regular file first.
+# The note ends "(checking with the template's copy meanwhile)" where the tracker check then
+# runs; in a repo that has not moved to docs/tracking/ no check runs, and it is said bare.
 TRK="" TRKNOTE=""
 if [ -f bin/track ] && [ -x bin/track ]; then TRK="$ROOT/bin/track"
 else
-  if [ -d bin/track ]; then TRKNOTE="bin/track exists but is a DIRECTORY — clear it and run sync (checking with the template's copy meanwhile)"
-  elif [ -f bin/track ]; then TRKNOTE="bin/track present but not executable — fix with chmod +x (checking with the template's copy meanwhile)"
-  elif [ -e bin/track ] || [ -L bin/track ]; then TRKNOTE="bin/track exists but is not a usable executable file — clear it and run sync (checking with the template's copy meanwhile)"
-  elif [ -f .repo-standard-version ]; then TRKNOTE="bin/track missing — run sync to restore it (checking with the template's copy meanwhile)"
+  if [ -d bin/track ]; then TRKNOTE="bin/track exists but is a DIRECTORY — clear it and run sync"
+  elif [ -f bin/track ]; then TRKNOTE="bin/track present but not executable — fix with chmod +x"
+  elif [ -e bin/track ] || [ -L bin/track ]; then TRKNOTE="bin/track exists but is not a usable executable file — clear it and run sync"
+  elif [ -f .repo-standard-version ]; then TRKNOTE="bin/track missing — run sync to restore it"
   fi
   [ -f "$TEMPLATE/bin/track" ] && [ -x "$TEMPLATE/bin/track" ] && TRK="$TEMPLATE/bin/track"
 fi
+
+# --- the tracking layout (F21, 0.9.0) -------------------------------------------------
+# From 0.9.0 the tracker's three files and STATUS live in docs/tracking/. Before, they sat
+# in docs/dev-notes/, and STATUS had no .md. verify reads the new place only (no tool reads
+# both layouts). In a repo that has not moved, its checks of docs/tracking/, of STATUS and
+# of the tracker would each call missing a file that is only waiting for its move, and name
+# a remedy that puts a second copy beside the first. So such a repo gets ONE line in place
+# of the three checks, naming the files and where they go:
+#   - a note, which counts as nothing, while the repo's stamp is older than 0.9.0: the move
+#     is a step of the upgrade it has not had yet, and verify --strict passes there as before;
+#   - a warning once the stamp says 0.9.0 or later: by then the files should have moved.
+# A file counts when it sits at the old path and nothing sits at its new one, and a symlink
+# counts as a file, dangling or not. That is bin/sync's test: sync refuses the repos this
+# line names, so the two must stay in lockstep. One file left behind counts as not moved:
+# the three checks wait for the whole move and do not judge half of one.
+# The version is the stamp's (line 1, second word). The standard's own source tree carries
+# no stamp, so its VERSION file stands in. With no version to read, it is the note.
+LAY_OLD="" LAY_VER="" LAY_AT=0
+for pair in tracker.md:tracker.md tracker.html:tracker.html tracker-hwm:tracker-hwm STATUS:STATUS.md; do
+  lay_o="docs/dev-notes/${pair%%:*}"; lay_n="docs/tracking/${pair##*:}"
+  if { [ -e "$lay_o" ] || [ -L "$lay_o" ]; } && ! { [ -e "$lay_n" ] || [ -L "$lay_n" ]; }; then
+    LAY_OLD="${LAY_OLD:+$LAY_OLD, }${pair%%:*}"
+  fi
+done
+if [ "$SOURCE" = 1 ]; then LAY_VER="$(head -n 1 VERSION 2>/dev/null | tr -d '[:space:]')"
+elif [ -f .repo-standard-version ]; then LAY_VER="$(awk 'NR==1{print $2}' .repo-standard-version 2>/dev/null)"; fi
+# By version order (sort -V, as the managed-files check below), not as text: 0.10.0 is later
+# than 0.9.0. tail reads all of sort's output, so no early exit can cut the pipe (B114).
+case "$LAY_VER" in
+  [0-9]*.[0-9]*) [ "$(printf '%s\n0.9.0\n' "$LAY_VER" | sort -V | tail -n 1)" = "$LAY_VER" ] && LAY_AT=1 ;;
+esac
 
 printf '%sverify%s %s' "$D" "$N" "$ROOT"
 [ -n "$ARCH" ] && printf '  [%s]' "$ARCH"; [ "$SOURCE" = 1 ] && printf '  [standard source]'; printf '\n'
@@ -159,23 +192,39 @@ else fail "README.md missing (the front door)"; fi
 
 # --- docs homes ---------------------------------------------------------------
 sect "docs homes"
-for d in docs/official docs/AI docs/dev-notes; do
+for d in docs/official docs/AI; do
   if [ -d "$d" ]; then pass "$d/ present"; else fail "$d/ missing"; fi
 done
+# The third required home is docs/tracking/, the tracker's and STATUS.md's, since 0.9.0
+# (F21). docs/dev-notes/, the maintainer's own notes, is created on first use and is no
+# longer checked, as docs/assets/ never was. A repo that has not moved gets its one line
+# here, in place of this check and of the STATUS and tracker checks (see "the tracking
+# layout" above).
+if [ -n "$LAY_OLD" ]; then
+  if [ "$LAY_AT" = 1 ]; then
+    if [ "$SOURCE" = 1 ]; then lay_is="the standard's source tree is at $LAY_VER"; else lay_is="this repo is stamped $LAY_VER"; fi
+    lay_md=""; case ", $LAY_OLD," in *", STATUS,"*) lay_md=" (STATUS becomes STATUS.md)" ;; esac
+    warn "$lay_is and still keeps tracking files in docs/dev-notes/ ($LAY_OLD), the layout before repo-standard 0.9.0 — move them to docs/tracking/$lay_md; docs/tracking/, STATUS and the tracker were not checked"
+  else
+    skip "this repo keeps tracking files in docs/dev-notes/ ($LAY_OLD), the layout before repo-standard 0.9.0 — they move to docs/tracking/ at its upgrade; docs/tracking/, STATUS and the tracker were not checked"
+  fi
+elif [ -d docs/tracking ]; then pass "docs/tracking/ present"; else fail "docs/tracking/ missing"; fi
 if [ -d docs/AI/session-handoffs ]; then pass "docs/AI/session-handoffs/ present"; else warn "docs/AI/session-handoffs/ missing"; fi
-# docs/dev-notes/STATUS is the standard's lightest resume pointer — the file the Stop
-# hook exempts from its DUE signal so it can be updated freely. In a repo that adopted
-# the standard its absence is drift (D13), same shape (and same non-regular-file
-# diagnosis) as the tracker.md check below. Presence-only: judging the content stays
-# human, so a present STATUS earns no pass line.
-if [ -f docs/dev-notes/STATUS ]; then :
-elif [ -e docs/dev-notes/STATUS ] || [ -L docs/dev-notes/STATUS ]; then
-  warn "docs/dev-notes/STATUS exists but is not a regular file — clear it, then restore the file or re-run init (--allow-dirty if it refuses the now-dirty tree)"
+# docs/tracking/STATUS.md is the standard's lightest resume pointer — the file the Stop
+# hook leaves out of its test for changed files, so that keeping it true calls for no
+# handoff. (Before 0.9.0 it was docs/dev-notes/STATUS; a repo still on that layout got its
+# one line above, and this check waits for the move.) In a repo that adopted the standard
+# its absence is drift (D13), same shape (and same non-regular-file diagnosis) as the
+# tracker.md check below. Presence-only: judging the content stays human, so a present
+# STATUS.md earns no pass line.
+if [ -n "$LAY_OLD" ] || [ -f docs/tracking/STATUS.md ]; then :
+elif [ -e docs/tracking/STATUS.md ] || [ -L docs/tracking/STATUS.md ]; then
+  warn "docs/tracking/STATUS.md exists but is not a regular file — clear it, then restore the file or re-run init (--allow-dirty if it refuses the now-dirty tree)"
 elif [ "$SOURCE" = 1 ] || [ -f .repo-standard-version ]; then
   # The advice must survive F10 (convergence K11): a deleted TRACKED file is itself the
   # dirty entry, so a bare "re-run init" always refuses — restore is the working remedy,
   # init the fallback for a repo that never had the file.
-  warn "docs/dev-notes/STATUS missing — the state file is part of the standard this repo adopted (git restore it, or re-run init — --allow-dirty if it refuses the dirty tree)"
+  warn "docs/tracking/STATUS.md missing — the state file is part of the standard this repo adopted (git restore it, or re-run init — --allow-dirty if it refuses the dirty tree)"
 fi
 
 # --- claude hooks -------------------------------------------------------------
@@ -213,8 +262,9 @@ if [ -f .claude/settings.json ]; then
   done
 else warn ".claude/settings.json missing (hooks not wired)"; fi
 # A root CLAUDE.md in every adopted repo (D34, decided 2026-09-14): the file Claude Code loads
-# in full at the start of every session holds the repo's standing instructions — even when all
-# it says is that they live in the personal CLAUDE.local.md. A WARN, like the front door's
+# in full at the start of every session holds the repo's standing instructions. The least it
+# holds is the two paragraphs init stamps (F22, 0.9.0): where work stands and who writes what,
+# and the pointer to the personal CLAUDE.local.md. A WARN, like the front door's
 # state section: an unwritten one is a todo that blocks the --strict sign-off, not a broken
 # repo. Presence only — what it says stays human. Same adopted-or-source gate and non-regular-
 # file diagnosis as STATUS above (D13, B90).
@@ -222,7 +272,7 @@ if [ -f CLAUDE.md ]; then pass "CLAUDE.md present"
 elif [ -e CLAUDE.md ] || [ -L CLAUDE.md ]; then
   warn "CLAUDE.md exists but is not a regular file — Claude Code cannot read it; replace it with the file"
 elif [ "$SOURCE" = 1 ] || [ -f .repo-standard-version ]; then
-  warn "CLAUDE.md missing at the repo root — every adopted repo has one, even if it only says the directives live in CLAUDE.local.md (re-run init to stamp it — --allow-dirty if it refuses the dirty tree — or write it)"
+  warn "CLAUDE.md missing at the repo root — every adopted repo has one, at the least the two paragraphs init stamps (re-run init to stamp it — --allow-dirty if it refuses the dirty tree — or write it)"
 fi
 # Does the INDEX blob of $2 (source path relative to toplevel $1) carry the exact rule
 # line $3? Shared by the settings.local.json arm here and the secret-hygiene safe-arm
@@ -450,14 +500,20 @@ else skip "no session-handoffs/ to check"; fi
 
 # --- tracker in sync ----------------------------------------------------------
 sect "tracker"
-if [ -f docs/dev-notes/tracker.md ]; then
+if [ -n "$LAY_OLD" ]; then
+  # Not moved to docs/tracking/ (see "the tracking layout" above): the one line is under
+  # docs homes, and nothing is judged here. The tool's own trouble is still reported: it
+  # does not depend on where the tracker is.
   [ -n "$TRKNOTE" ] && warn "$TRKNOTE"
+  skip "not checked: the tracking files have not moved (see docs homes, above)"
+elif [ -f docs/tracking/tracker.md ]; then
+  [ -n "$TRKNOTE" ] && warn "$TRKNOTE (checking with the template's copy meanwhile)"
   # The skeleton H1 placeholder can only live here, and this is the file that carries it (B61).
-  if head -n 1 docs/dev-notes/tracker.md 2>/dev/null | grep -qF '<repo>'; then
+  if head -n 1 docs/tracking/tracker.md 2>/dev/null | grep -qF '<repo>'; then
     warn "tracker.md H1 still has the skeleton placeholder '<repo>'"
   fi
-  if [ ! -f docs/dev-notes/tracker.html ]; then
-    if [ -e docs/dev-notes/tracker.html ] || [ -L docs/dev-notes/tracker.html ]; then
+  if [ ! -f docs/tracking/tracker.html ]; then
+    if [ -e docs/tracking/tracker.html ] || [ -L docs/tracking/tracker.html ]; then
       warn "tracker.html exists but is not a regular file — clear it, then run 'track render'"
     else
       warn "tracker.html not generated — run 'track render'"
@@ -470,7 +526,7 @@ if [ -f docs/dev-notes/tracker.md ]; then
     # exit 1 is both "stale" and every track error, and a broken/stub track exiting 0
     # used to pass as "in sync" — a claim nothing had actually checked.
     tchk="$(mktemp -d)"; trc=0
-    if ! cp docs/dev-notes/tracker.md docs/dev-notes/tracker.html "$tchk/" 2>/dev/null; then
+    if ! cp docs/tracking/tracker.md docs/tracking/tracker.html "$tchk/" 2>/dev/null; then
       rm -rf "$tchk"
       warn "tracker.md/tracker.html could not be read — fix permissions; sync cannot be judged"
     else
@@ -487,18 +543,19 @@ if [ -f docs/dev-notes/tracker.md ]; then
       # and fails; a path-derived title differs between them, and only then is the
       # title-insensitive comparison (everything but the two title-bearing lines)
       # allowed to bless the pair.
-      # The two copies sit at the CANONICAL docs/dev-notes depth under differently-
-      # named roots: a path-deriving track walks two directories up from tracker.md,
-      # and the difference must live above that walk to show in the title.
-      ta="$tchk/pa/docs/dev-notes" tb="$tchk/pb/docs/dev-notes"
+      # The two copies sit at the CANONICAL depth (docs/tracking, as docs/dev-notes was
+      # before 0.9.0) under differently-named roots: a path-deriving track walks two
+      # directories up from tracker.md, and the difference must live above that walk to
+      # show in the title.
+      ta="$tchk/pa/docs/tracking" tb="$tchk/pb/docs/tracking"
       if mkdir -p "$ta" "$tb" 2>/dev/null \
-         && cp docs/dev-notes/tracker.md "$ta/tracker.md" 2>/dev/null \
-         && cp docs/dev-notes/tracker.md "$tb/tracker.md" 2>/dev/null \
+         && cp docs/tracking/tracker.md "$ta/tracker.md" 2>/dev/null \
+         && cp docs/tracking/tracker.md "$tb/tracker.md" 2>/dev/null \
          && TRACKER_FILE="$ta/tracker.md" "$TRK" render >/dev/null 2>&1 && [ -f "$ta/tracker.html" ] \
          && TRACKER_FILE="$tb/tracker.md" "$TRK" render >/dev/null 2>&1 && [ -f "$tb/tracker.html" ] \
          && ! cmp -s "$ta/tracker.html" "$tb/tracker.html" \
          && cmp -s <(awk 'index($0,"<title>")==0 && index($0,"<h1")==0' "$ta/tracker.html") \
-                   <(awk 'index($0,"<title>")==0 && index($0,"<h1")==0' docs/dev-notes/tracker.html); then
+                   <(awk 'index($0,"<title>")==0 && index($0,"<h1")==0' docs/tracking/tracker.html); then
         pass "tracker.html in sync with tracker.md (only the page title differs — this repo's bin/track titles by path; run sync to update it)"
       else
         fail "tracker.html is stale — run 'track render'"
@@ -510,20 +567,20 @@ if [ -f docs/dev-notes/tracker.md ]; then
       # tracker's home: the B85 0x1f guard routes corrupt-FILE refusals here, and a
       # bare "fix track" misdirected at a healthy tool while the file/line/remedy in
       # $tmsg (a path under $tchk, deleted two lines down) never reached the operator.
-      tline="${tmsg%%$'\n'*}"; tline="${tline//"$tchk"/docs/dev-notes}"
+      tline="${tmsg%%$'\n'*}"; tline="${tline//"$tchk"/docs/tracking}"
       warn "track render --check failed (exit $trc)${tline:+: $tline} — a tool or tracker-file problem, not proven staleness"
     fi
     rm -rf "$tchk"
     fi
   else warn "tracker.md present but no track tool found to verify it"; fi
-elif [ -e docs/dev-notes/tracker.md ] || [ -L docs/dev-notes/tracker.md ]; then
+elif [ -e docs/tracking/tracker.md ] || [ -L docs/tracking/tracker.md ]; then
   # Same non-file diagnosis as README.md/bin/track get (B90/B97's class): "missing"
   # plus a re-run-init remedy would be a dead end — init skips existing paths.
-  warn "docs/dev-notes/tracker.md exists but is not a regular file — clear it, then restore the file or re-run init (--allow-dirty if it refuses the now-dirty tree)"
+  warn "docs/tracking/tracker.md exists but is not a regular file — clear it, then restore the file or re-run init (--allow-dirty if it refuses the now-dirty tree)"
 elif [ "$SOURCE" = 1 ] || [ -f .repo-standard-version ]; then
   # This repo adopted the standard: an absent tracker is DRIFT, not "not applicable"
   # (B32, B04's class) — the old '----' line appeared in no tally at all.
-  warn "docs/dev-notes/tracker.md missing — the tracker is part of the standard this repo adopted (git restore it, or re-run init — --allow-dirty if it refuses the dirty tree)"
+  warn "docs/tracking/tracker.md missing — the tracker is part of the standard this repo adopted (git restore it, or re-run init — --allow-dirty if it refuses the dirty tree)"
 else skip "no tracker.md to check"; fi
 
 # --- commit guard -------------------------------------------------------------
@@ -706,6 +763,9 @@ fi
 # lines — the exception then lives next to the thing it excepts and shows up in every
 # diff of that file. A file that CANNOT carry a text line (a .p12/DER keystore) declares
 # itself through a committed sidecar `<file>.allow-committed` holding the marker (B75).
+# The sidecar also serves a file that could carry the line but must stay byte for byte as
+# it was received — a captured key, a vendor's file (D50): the check below accepts the
+# sidecar beside any file, so which of the two a file uses is the repo's choice.
 # Record the *why* in DEVIATIONS.md; this is only the mechanism.
 #
 # Every judgment about COMMITTED state reads the INDEX BLOB, never the worktree (B60):

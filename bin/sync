@@ -8,6 +8,9 @@
 # generated tracker.html when the renderer itself changed, and refreshes
 # .repo-standard-version. Never touches authored content (README, docs, tracker.md).
 # Does NOT commit.
+# Stops before it writes anything in a repo that still keeps a tracking file (tracker.md,
+# tracker.html, tracker-hwm, STATUS) in docs/dev-notes/, the layout before 0.9.0: it names
+# each file and where it moves to, and exits 2 (1 under --check).
 #   --check     : report what would change and exit nonzero if out of date; change nothing.
 #   --force     : take the canonical settings.json even where the target customized it.
 #                 In the standard's OWN source tree: dogfood mode — propagate template/ to
@@ -31,7 +34,9 @@ while [ $# -gt 0 ]; do
     --check)     CHECK=1; shift ;;
     --force)     FORCE=1; shift ;;
     --downgrade) DOWNGRADE=1; shift ;;
-    -h|--help)   sed -n '2,16p' "$0"; exit 0 ;;
+    # The whole header comment, wherever it ends: a fixed range ('2,16p') cut the last line
+    # off a header of 17 lines.
+    -h|--help)   awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
     -*)          errx "unknown option '$1'" ;;
     *)           if [ -z "$TARGET" ]; then TARGET="$1"; else errx "unexpected arg '$1'"; fi; shift ;;
   esac
@@ -104,6 +109,42 @@ case "$cur_ver" in
       fi
     fi ;;
 esac
+
+hdr(){ printf '%ssync%s %s -> standard %s%s%s\n' "$D" "$N" "$ROOT" "$VERSION" "${CHECK:+  (check)}" "${DOGFOOD:+  (dogfood)}"; }
+
+# --- the tracking layout (F21, 0.9.0) -------------------------------------------------
+# From 0.9.0 the tracker's three files and STATUS live in docs/tracking/. Before, they sat
+# in docs/dev-notes/, and STATUS had no .md. The tools from 0.9.0 on read the new place
+# only, so machinery synced into a repo that has not moved would look for its tracker and
+# its STATUS where they are not. Stop here, before any write, and name what is still to
+# move. Moving the files is the repo's own upgrade step: they are authored content, which
+# sync never touches.
+# A file counts when it sits at the old path and nothing sits at its new one. So a note of
+# the maintainer's own that happens to be called docs/dev-notes/STATUS, beside a moved
+# docs/tracking/STATUS.md, stops nothing. A symlink counts as a file, dangling or not (the
+# rule of B73). Dogfood mode is held to it as well: the source repo moves like any other
+# before it takes its own new machinery.
+tomove=""
+for pair in tracker.md:tracker.md tracker.html:tracker.html tracker-hwm:tracker-hwm STATUS:STATUS.md; do
+  lay_o="docs/dev-notes/${pair%%:*}"; lay_n="docs/tracking/${pair##*:}"
+  if { [ -e "$lay_o" ] || [ -L "$lay_o" ]; } && ! { [ -e "$lay_n" ] || [ -L "$lay_n" ]; }; then
+    tomove="$tomove$lay_o -> $lay_n"$'\n'
+  fi
+done
+if [ -n "$tomove" ]; then
+  if [ -n "$CHECK" ]; then
+    hdr
+    while IFS= read -r lay_l; do [ -z "$lay_l" ] || printf '  %sMOVE%s  %s\n' "$Y" "$N" "$lay_l"; done <<< "$tomove"
+    printf '%s(--check: out of date. The files above are still in docs/dev-notes/, the layout before 0.9.0; they move to docs/tracking/ first, and nothing else was checked.)%s\n' "$D" "$N"
+    exit 1
+  fi
+  { printf 'sync: %s keeps tracking files in docs/dev-notes/, the layout before repo-standard 0.9.0:\n' "$ROOT"
+    while IFS= read -r lay_l; do [ -z "$lay_l" ] || printf '        %s\n' "$lay_l"; done <<< "$tomove"
+    printf '      Nothing was changed. The files move as part of the repo'"'"'s upgrade to 0.9.0, and sync runs\n'
+    printf '      after the move. (This checkout is repo-standard %s.)\n' "$VERSION"
+  } >&2
+  exit 2
+fi
 
 # The canonical, non-authored machinery. Authored content (README, docs, tracker.md) is NEVER synced.
 # bin/register (F17) is machinery for a vendor-derived repo only, judged from the stamp: an
@@ -186,7 +227,7 @@ wired(){ wired_seg "$1" Stop SessionStart stop-handoff-check.sh \
 # runners, which git never touches.
 perm_why(){ case "$1" in .githooks/*) printf 'git silently ignores a non-exec hook' ;; .claude/*) printf 'Claude Code cannot run a non-exec hook script' ;; *) printf 'it is invoked by path' ;; esac; }
 
-printf '%ssync%s %s -> standard %s%s%s\n' "$D" "$N" "$ROOT" "$VERSION" "${CHECK:+  (check)}" "${DOGFOOD:+  (dogfood)}"
+hdr
 updated=0 added=0 permfix=0 same=0 conflicts=0 blockedw=0 wfail=0 tmplmiss=0 track_updated=0 genpend=0 strays=0 reg_updated=0
 while IFS= read -r rel; do
   [ -n "$rel" ] || continue
@@ -448,9 +489,9 @@ if { [ "$track_updated" = 1 ] || [ -n "$DOGFOOD" ] \
      || cmp -s "$TEMPLATE/bin/track" "$ROOT/bin/track" 2>/dev/null; } \
    && [ -f bin/track ] && [ -x bin/track ] \
    && { [ ! -L bin/track ] || [ -n "$DOGFOOD" ]; } \
-   && [ -f docs/dev-notes/tracker.md ] && [ ! -L docs/dev-notes/tracker.md ] \
-   && [ -f docs/dev-notes/tracker.html ]; then
-  if ! dst_ok "$ROOT/docs/dev-notes/tracker.html" "docs/dev-notes/tracker.html"; then
+   && [ -f docs/tracking/tracker.md ] && [ ! -L docs/tracking/tracker.md ] \
+   && [ -f docs/tracking/tracker.html ]; then
+  if ! dst_ok "$ROOT/docs/tracking/tracker.html" "docs/tracking/tracker.html"; then
     blockedw=$((blockedw+1))
   elif [ -n "$CHECK" ]; then
     # Report-only must not EXECUTE the target's bin/track (target-controlled code) nor
@@ -459,30 +500,30 @@ if { [ "$track_updated" = 1 ] || [ -n "$DOGFOOD" ] \
     # renderer on COPIES in a temp dir: exactly what a real sync would deliver.
     if [ -f "$TEMPLATE/bin/track" ] && [ -x "$TEMPLATE/bin/track" ]; then
       gtmp="$(mktemp -d)"
-      if ! cp docs/dev-notes/tracker.md docs/dev-notes/tracker.html "$gtmp/" 2>/dev/null; then
+      if ! cp docs/tracking/tracker.md docs/tracking/tracker.html "$gtmp/" 2>/dev/null; then
         # Unreadable pair: a real sync would FAIL the re-render, not perform it — the
         # prediction must say so (re-attack), not promise a GEN that cannot happen.
-        printf '  %sFAIL%s  docs/dev-notes/tracker.html (tracker pair unreadable — a real sync could not re-render it; fix permissions)\n' "$Y" "$N"
+        printf '  %sFAIL%s  docs/tracking/tracker.html (tracker pair unreadable — a real sync could not re-render it; fix permissions)\n' "$Y" "$N"
         wfail=$((wfail+1))
       elif TRACKER_FILE="$gtmp/tracker.md" "$TEMPLATE/bin/track" render --check >/dev/null 2>&1; then
         : # already current under the canonical renderer
       else
-        printf '  %sGEN %s  docs/dev-notes/tracker.html (stale under the current renderer — sync will re-render it)\n' "$C" "$N"
+        printf '  %sGEN %s  docs/tracking/tracker.html (stale under the current renderer — sync will re-render it)\n' "$C" "$N"
         genpend=$((genpend+1))
       fi
       rm -rf "$gtmp"
     fi   # template's track missing/unusable: the machinery loop already ???'d that
-  elif TRACKER_FILE="$ROOT/docs/dev-notes/tracker.md" ./bin/track render --check >/dev/null 2>&1; then
+  elif TRACKER_FILE="$ROOT/docs/tracking/tracker.md" ./bin/track render --check >/dev/null 2>&1; then
     : # already current under the new renderer (just synced, so this runs OUR code)
-  elif TRACKER_FILE="$ROOT/docs/dev-notes/tracker.md" ./bin/track render >/dev/null 2>&1 \
-       && [ -f docs/dev-notes/tracker.html ]; then
+  elif TRACKER_FILE="$ROOT/docs/tracking/tracker.md" ./bin/track render >/dev/null 2>&1 \
+       && [ -f docs/tracking/tracker.html ]; then
     # Counted as an update (re-attack): a dogfood run whose ONLY change was this
     # re-render used to print an all-zero summary and skip the 'synced.' nudge while
     # a repo file had just been rewritten.
-    printf '  %sGEN %s  docs/dev-notes/tracker.html (re-rendered — the pair was stale under the current renderer)\n' "$C" "$N"
+    printf '  %sGEN %s  docs/tracking/tracker.html (re-rendered — the pair was stale under the current renderer)\n' "$C" "$N"
     updated=$((updated+1))
   else
-    printf '  %sFAIL%s  docs/dev-notes/tracker.html (re-render failed — run ./bin/track render yourself)\n' "$Y" "$N"
+    printf '  %sFAIL%s  docs/tracking/tracker.html (re-render failed — run ./bin/track render yourself)\n' "$Y" "$N"
     wfail=$((wfail+1))
   fi
 fi

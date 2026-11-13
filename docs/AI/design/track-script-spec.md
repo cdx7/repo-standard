@@ -17,7 +17,7 @@ Status Changed maintained automatically, with the least machinery that works.*
 
 ---
 
-## 1. The file it owns — `docs/dev-notes/tracker.md`
+## 1. The file it owns — `docs/tracking/tracker.md`
 
 Human-readable, GitHub-renders-as-tables, and machine-appendable. Also ships as
 `template/…/tracker.skel.md` (empty tables, and an empty Details section with a comment on
@@ -140,6 +140,20 @@ in the same category. Fail-closed: on any error, the file is left untouched.
 - If `<status>` equals the current status → **no-op** (`F05 already in-progress`), no re-stamp.
 - Else rewrites the Status cell (`<emoji> <word>`) and sets **Status Changed** = today.
 - Prints `F05: open → in-progress`. Exit 0.
+- **When `STATUS.md` names the row** (F22, 0.9.0): after a change that really happened, and
+  only when a `STATUS.md` in the tracker's own folder names the ID as a whole word, one more
+  line goes to standard error, after the line above and before the render's:
+  `STATUS names F05 (docs/tracking/STATUS.md, line 8): change only what is no longer true there, in the same commit.`
+  - Every line that names the row is listed: `lines 8 and 14`, `lines 8, 9 and 14`. An item
+    can wrap, and another item's words can cite the row.
+  - "Names the row" is the match `history` uses for a commit message (below): `F05` and
+    `F05.` match; `F050`, `xF05` and the child `F05.1` do not.
+  - The path is from the repo's root where git knows the tracker's folder; outside git it is
+    the path as the tool holds it.
+  - Nothing is printed on a no-op, on `add`, or with no `STATUS.md` beside the tracker. A
+    `STATUS.md` that cannot be read says nothing.
+  - The line judges nothing: it says that STATUS names the row, not that STATUS is wrong. It
+    never stops the command, and standard output stays as it was.
 
 **Guards:** unknown ID / status-not-valid-for-category → error, no write.
 
@@ -229,15 +243,24 @@ Add only if scanning the raw markdown starts to annoy; otherwise leave it out.
 
 ## 4. Behavior / guardrails
 
-- **File discovery** (order updated 2026-08-13, B19/B62): `$TRACKER_FILE` if set; else the
-  repo the INVOKED copy lives in (`$0/../docs/dev-notes/tracker.md` — so
+- **File discovery** (order updated 2026-08-13, B19/B62; the folder is `docs/tracking/`
+  since 0.9.0, F21): `$TRACKER_FILE` if set; else the
+  repo the INVOKED copy lives in (`$0/../docs/tracking/tracker.md` — so
   `<target>/bin/track add …` tracks `<target>` no matter where you stand; `$0` deliberately
   unresolved, since the standard's own `bin/track` is a symlink into `template/`); else
-  `docs/dev-notes/tracker.md` under `$CLAUDE_PROJECT_DIR` or `git rev-parse
+  `docs/tracking/tracker.md` under `$CLAUDE_PROJECT_DIR` or `git rev-parse
   --show-toplevel`; else `./tracker.md` as a last resort, ANNOUNCED on stderr. Whichever file
   resolves must carry at least one of the four category headings (`## Bugs`, `## Features`,
   `## Documentation`, `## Testing`) outside a fenced block, or every command refuses before
   reading further or writing anything (B147).
+- **The layout before 0.9.0 stops it** (F21). Until 0.9.0 the tracker was kept in
+  `docs/dev-notes/`. When a repo found in the second or third place has something at that old
+  path (a link counts as a file) and nothing at the new one, the tool stops before any
+  command runs: exit 1, a message on standard error that names the repo, nothing changed.
+  The search ends there. It does not go on to the next place or to `./tracker.md`, because a
+  tool invoked from a repo that has not moved would otherwise write into another tracker.
+  `$TRACKER_FILE` still names a tracker anywhere, the old folder included, and `--help` needs
+  no tracker. No tool of the standard reads both layouts.
 - **Atomic writes:** write to a temp file, then `mv` over the original — never a partial
   file. A `tracker.md.lock` directory (mkdir-atomic) serializes concurrent mutators (B46);
   temp files and the lock are cleaned on any exit.
@@ -301,4 +324,6 @@ Worked example:
 $ track add feature "wallpaper randomizer"          # → added F15  (open, dated today)
 $ track add feature "per-monitor wallpaper" --parent F15   # → added F15.1
 $ track set-status F15 in-progress                  # → F15: open → in-progress  (Status Changed = today)
+#   and on standard error, when STATUS.md beside the tracker names F15 (§ 3):
+#   STATUS names F15 (docs/tracking/STATUS.md, line 8): change only what is no longer true there, in the same commit.
 ```

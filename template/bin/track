@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Managed by repo-standard: read REPO-STANDARD.md at the repo root before editing, moving or
 # deleting this file. sync replaces it from the standard.
-# track — minimal tracker CLI for docs/dev-notes/tracker.md.
+# track — minimal tracker CLI for docs/tracking/tracker.md.
 #   track add <bug|feature|doc|testing> "<name>" [--parent ID] [--status S] [--desc "…"]
 #   track set-status <ID> <status>
 #   track render [--check]             # regenerate tracker.html (--check: verify, write nothing)
@@ -13,8 +13,12 @@
 # '### <ID> — <Name>' (the row's Name exactly), then free text, written by hand; render shows
 # it under the row and refuses a heading it cannot match to exactly one row.
 # Tracker resolution order: $TRACKER_FILE; the repo the INVOKED copy lives in
-# ($0/../docs/dev-notes/tracker.md); CLAUDE_PROJECT_DIR or the cwd's git root;
-# ./tracker.md as a last resort (announced on stderr).
+# ($0/../docs/tracking/tracker.md); CLAUDE_PROJECT_DIR or the cwd's git root;
+# ./tracker.md as a last resort (announced on stderr). A repo that still keeps its tracker
+# in docs/dev-notes/, the layout before 0.9.0, ends the search: track says so and stops
+# ($TRACKER_FILE still names a tracker anywhere).
+# After set-status changes a status, track says so on stderr when STATUS.md beside the
+# tracker names the row: the file is kept true in the same commit. It judges nothing.
 # Portable: bash (>= 4) + awk + coreutils + date. No jq. Never commits (you gate that).
 set -euo pipefail
 # The state model below rides associative arrays — bash 4 machinery. Say so at the door
@@ -103,6 +107,23 @@ cat_of_id() {
 }
 
 # ── Locate the tracker file ───────────────────────────────────────────────────────────
+# old_layout <root>: stop when <root> keeps its tracker where it was before 0.9.0 (F21) —
+# something at docs/dev-notes/tracker.md, a link counting as a file, and nothing at
+# docs/tracking/tracker.md: the test sync, verify and init make. No tool reads both
+# layouts, so that tracker is not used where it is. And the search ENDS there: going on
+# to the next place would let a track invoked from a repo that has not moved write into
+# the tracker of whichever repo the caller stands in (B19's disease), or into a
+# ./tracker.md. Runs before any command, so nothing has been changed when it stops.
+old_layout() {
+  local o="$1/docs/dev-notes/tracker.md" n="$1/docs/tracking/tracker.md"
+  if { [ -e "$o" ] || [ -L "$o" ]; } && ! { [ -e "$n" ] || [ -L "$n" ]; }; then
+    { printf 'track: %s keeps its tracker in docs/dev-notes/, the layout before repo-standard 0.9.0;\n' "$1"
+      printf '       this track looks in docs/tracking/. Nothing was changed. The tracking files move as part of the\n'
+      printf '       repo'"'"'s upgrade to 0.9.0; meanwhile TRACKER_FILE names the tracker where it is.\n'
+    } >&2
+    exit 1
+  fi
+}
 resolve_file() {
   if [ -n "${TRACKER_FILE:-}" ]; then FILE="$TRACKER_FILE"
   else
@@ -114,15 +135,22 @@ resolve_file() {
     # it would name template/ instead of the repo.
     local sroot=""; sroot="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || true)"
     local root; root="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
-    if [ -n "$sroot" ] && [ -f "$sroot/docs/dev-notes/tracker.md" ]; then FILE="$sroot/docs/dev-notes/tracker.md"
-    elif [ -n "$root" ] && [ -f "$root/docs/dev-notes/tracker.md" ]; then FILE="$root/docs/dev-notes/tracker.md"
+    # The two canonical places, in that order: each holds the tracker, or keeps the old
+    # layout (old_layout stops there), or is passed over.
+    local r; FILE=""
+    for r in "$sroot" "$root"; do
+      [ -n "$r" ] || continue
+      if [ -f "$r/docs/tracking/tracker.md" ]; then FILE="$r/docs/tracking/tracker.md"; break; fi
+      old_layout "$r"
+    done
+    if [ -n "$FILE" ]; then :
     elif [ -f "./tracker.md" ]; then
       # cwd fallback, previously silent and undocumented (B62): kept for ad-hoc use,
       # but ANNOUNCED — quietly mutating whichever tracker.md the operator sits next
       # to is how edits land in the wrong repo's file.
       FILE="./tracker.md"
-      printf 'track: using ./tracker.md (no canonical docs/dev-notes/tracker.md found; set TRACKER_FILE to silence this)\n' >&2
-    else FILE="${root:+$root/docs/dev-notes/tracker.md}"; FILE="${FILE:-./tracker.md}"
+      printf 'track: using ./tracker.md (no canonical docs/tracking/tracker.md found; set TRACKER_FILE to silence this)\n' >&2
+    else FILE="${root:+$root/docs/tracking/tracker.md}"; FILE="${FILE:-./tracker.md}"
     fi
   fi
   [ -f "$FILE" ] || err "tracker file not found: ${FILE:-<none>} (set TRACKER_FILE, or create tracker.md)"
@@ -367,6 +395,43 @@ cmd_add() {
 }
 
 # ── set-status ────────────────────────────────────────────────────────────────────────
+# id_pat <ID>: the ERE that matches the ID whole — never inside a longer number, never as
+# part of a child's ID (each child has its own), never as the tail of a word, but an ID that
+# ends a sentence still counts. One definition, for history's commits and citing files and
+# for the look at STATUS.md below.
+id_pat() { printf '(^|[^A-Za-z0-9.])%s([^0-9.]|\\.([^0-9]|$)|$)' "${1//./\\.}"; }
+# status_names <ID>: after a status change, say so when STATUS.md beside the tracker names
+# the row (F22): that file is kept true in the same commit, and this is where whoever made
+# the change is told. One line, on stderr like the tool's other notice on a success path
+# (the ./tracker.md announcement), so stdout stays the two lines it was. It lists every line
+# that names the ID and judges nothing. Only STATUS.md in the tracker's OWN folder is read:
+# a STATUS (no .md) beside a tracker still in docs/dev-notes/ is the layout before 0.9.0.
+# The path is given from the repo's root where git knows it (physical paths on both sides,
+# as in history), else as the tool holds it. Never fatal: the status is already changed and
+# the page is still to render, so a STATUS.md that cannot be read says nothing. An ID that
+# is not of the tracker's form (a row mangled by hand, retired through set-status) is not
+# looked for: it would be read as a pattern.
+status_names() {
+  local st lines where dir root
+  st="$(dirname -- "$FILE")/STATUS.md"
+  [ -f "$st" ] || return 0
+  printf '%s' "$1" | grep -qE '^[BFDT][0-9]+(\.[0-9]+)*$' || return 0
+  lines="$(PAT="$(id_pat "$1")" LC_ALL=C awk '
+      $0 ~ ENVIRON["PAT"] { L[++n]=NR }
+      END { if(!n) exit
+            s=(n==1) ? "line " : "lines "
+            for(i=1;i<=n;i++) s=s L[i] ((i<n-1) ? ", " : ((i==n-1) ? " and " : ""))
+            print s }' "$st" 2>/dev/null || true)"
+  [ -n "$lines" ] || return 0
+  where="$st"
+  if dir="$(cd "$(dirname -- "$FILE")" 2>/dev/null && pwd -P)" \
+     && root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" && [ -n "$root" ]; then
+    case "$dir/" in
+      "$root"/*) where="${dir#"$root"}"; where="${where#/}"; where="${where:+$where/}STATUS.md" ;;
+    esac
+  fi
+  printf 'STATUS names %s (%s, %s): change only what is no longer true there, in the same commit.\n' "$1" "$where" "$lines" >&2
+}
 cmd_set_status() {
   [ $# -eq 2 ] || err "usage: track set-status <ID> <status>"
   take_lock
@@ -399,6 +464,10 @@ cmd_set_status() {
     { r=$2; gsub(/ /,"",r); if(r==id){ $3=cell; $5=when } print }' "$FILE" > "$tmp" \
     && mv "$tmp" "$FILE" || err "cannot write next to $FILE (directory unwritable or disk full?)"
   printf '%s: %s → %s  (Status Changed = %s)\n' "$id" "$cur" "$status" "$today"
+  # A notice only, so it never stops the render. And it comes BEFORE the render: cmd_render's
+  # row loop reads into id, cat and status, names bash scopes dynamically, so after it they
+  # are no longer this function's.
+  status_names "$id" || true
   [ -n "${TRACK_NO_RENDER:-}" ] || cmd_render   # keep tracker.html in sync
 }
 
@@ -907,9 +976,9 @@ cmd_history() {
   [ -z "$what" ] || lines+=("  uncommitted          $what")
   [ "$r" = 1 ] || [ "$seen" = 1 ] || err "$id has no row, now or in the history of $rel"
 
-  # Commits whose messages name the ID, matched whole: never inside a longer number, never
-  # a child's ID (each child has its own history), but an ID ending a sentence still counts.
-  local pat="(^|[^A-Za-z0-9.])${id//./\\.}([^0-9.]|\\.([^0-9]|\$)|\$)" commits
+  # Commits whose messages name the ID, matched whole (id_pat): never inside a longer number,
+  # never a child's ID (each child has its own history), but an ID ending a sentence still counts.
+  local pat commits; pat="$(id_pat "$id")"
   commits="$(git -C "$root" log --reverse -E --format='%cs  %h  %s' --grep="$pat" 2>/dev/null)"
 
   # Tracked files that cite it, the tracker's own three files left out (the sidecar holds

@@ -2,6 +2,99 @@
 
 Releases before 0.5.0 were made privately; their notes are not published.
 
+## 0.9.0 — 2026-11-13
+The tracker and STATUS get a home of their own, `docs/tracking/`, and `docs/dev-notes/` holds
+the maintainer's own notes and nothing else. STATUS gets a decided shape, and the rules on who
+writes what in an adopted repo now travel with the repo, in its notice. Three managed files
+change: the tracker tool, the Stop hook and the `REPO-STANDARD.md` notice. **An adopted repo is
+moved by hand before it syncs:** `sync` stops on a repo that has not moved (Upgrading, below).
+
+- **Changed (F21): the tracker's three files and STATUS live in `docs/tracking/`.**
+  `tracker.md`, `tracker.html` and `tracker-hwm` keep their names, and `STATUS` becomes
+  `STATUS.md`. They sat in `docs/dev-notes/`, under the rule that the folder is the
+  maintainer's own notes and Claude does not overwrite them. That rule described neither
+  file any more: a tool keeps the tracker, and sessions edit STATUS on the maintainer's go.
+  `docs/tracking/` is now the third required home. `docs/dev-notes/` is created on first use
+  and no longer checked, like `docs/assets/`.
+- **No tool reads both layouts.** A repo still keeps the old one when a tracking file sits at
+  its old path, a link counting as a file, with nothing at its new path. On such a repo:
+  - `sync` stops before it writes anything, exit 2, naming each file and where it goes.
+    `sync --check` reports the repo as out of date, one `MOVE` line per file, exit 1.
+  - `init` refuses before it writes anything, whatever the flags.
+  - `verify` says so in one line, in place of its checks of `docs/tracking/`, `STATUS.md` and
+    the tracker: a note under a stamp older than 0.9.0, a warning from 0.9.0 on.
+  - `bin/track` stops before any command runs, when the tracker itself is still there. It
+    does not go on to another repo's tracker or to `./tracker.md`. `TRACKER_FILE` still names
+    a tracker anywhere.
+- **`init` writes the new layout:** `docs/tracking/STATUS.md`, the tracker and its page, and
+  no `docs/dev-notes/`. The two skeletons moved to `template/docs/tracking/`.
+- **The Stop hook** leaves `docs/tracking/STATUS.md` out of its test for changed files, and
+  no longer `docs/dev-notes/STATUS`: a note of that name now counts like any other file.
+- **Added (F22): STATUS has a shape, and a rule for keeping it true.**
+  - Three sections: `## NOW`, `## NEXT` and `## EVENTUALLY`. 20 to 30 lines of pointers.
+  - An item reads `<folder>: <ID>, <ID> · <status> · <words>`, with the status in the
+    tracker's own word.
+  - A pointer to a handoff ends an item only when the newest handoff does not cover it, and
+    is written as the stamp from the file's name.
+  - The session keeps STATUS true. Whenever it writes a handoff or changes a tracker row's
+    status, it checks STATUS, changes only what is no longer true, and puts that in the same
+    commit. Everything else in STATUS is the maintainer's.
+  - STANDARD.md has a new section 10 for all of it, and the STATUS skeleton carries the rules
+    in a comment at its bottom.
+- **Three reminders reach a session where it works** (F22):
+  - a paragraph in the `CLAUDE.md` that `init` stamps;
+  - two sentences in the Stop hook's message: a handoff says nothing about its own commit;
+    and, where `docs/tracking/STATUS.md` exists, check it and change only what is no longer
+    true;
+  - one line from `track set-status`, on standard error, when `STATUS.md` beside the tracker
+    names the row it has just changed. The line gives the file and each line that names the
+    row. It judges nothing and never stops the command.
+- **Added (D53): the notice says who writes what.** `REPO-STANDARD.md` gains two sections,
+  "Who writes what" and "STATUS". STANDARD.md does not travel into an adopted repo, and the
+  notice does. The rules: `docs/dev-notes/` is the maintainers' own; the session keeps STATUS
+  true, and the rest of it is the maintainers'; a commit or a push waits for a go, with what
+  changed shown first; before a maintainer leaves, the session writes a handoff if anything
+  changed; a handoff says nothing about its own commit. STANDARD.md states them in its
+  sections 2, 4, 8 and 10. The logoff rule had been in the transfer prompt only.
+- **Changed: the smallest `CLAUDE.md`.** It was the statement that all Claude directives for
+  the repo are in `CLAUDE.local.md`. It is now the two paragraphs `init` stamps: the first, on
+  where work stands and who writes what, and the pointer to `CLAUDE.local.md`. Without the
+  first, nothing a session loads at its start leads to the notice. `verify` checks that the
+  file is there and never what it says; its warning for a missing one names the two
+  paragraphs.
+- **Changed (D50): the allow-committed sidecar** also serves a file that could carry the
+  marker line but must stay byte for byte as it was received: a captured key, a vendor's
+  file. `verify` already accepted the sidecar beside any file; STANDARD.md now says so.
+- **Smaller:** `sync --help` and `init --help` print their whole header. Each had cut it at a
+  fixed line.
+- **Docs:** STANDARD.md (sections 2, 3, 4, 5, 8 and the new 10, the toolkit, the secret
+  check), the `REPO-STANDARD.md` notice, the README and `CLAUDE.md` skeletons, the transfer
+  prompt, and the specs of the tracker tool and of the notice.
+- **Tests,** private like the other suites. `tests/tracking-layout.sh` is new: 502 cases at
+  this version, for `sync`, `verify`, `init`, the tracker tool, a repo's move and the words a
+  repo receives. `tests/stop-hook.sh` grows from 12 cases to 32, and `tests/publish.sh` from
+  63 to 73. Six more suites follow the move. All thirteen suites: 1140 cases.
+- **Upgrading:** an adopted repo is moved before it syncs. Until it is, `verify` run from
+  this checkout names the move in one line and reports that 0.9.0 is available. From a clean
+  tree:
+  1. `mkdir -p docs/tracking`, then `git mv` each file that exists: `tracker.md`,
+     `tracker.html` and `tracker-hwm` from `docs/dev-notes/` to `docs/tracking/` under the
+     same names, and `docs/dev-notes/STATUS` to `docs/tracking/STATUS.md`. `git mv` keeps each
+     file's history, and `track history` follows a row across the move. Remove
+     `docs/dev-notes/` if that leaves it empty.
+  2. `bin/sync <repo>` from a 0.9.0 checkout. It brings the tracker tool, the Stop hook, the
+     notice and the stamp.
+  3. Search the repo for `docs/dev-notes`, scripts before documents, and repoint each living
+     mention. The README and `CLAUDE.md` name STATUS and the tracker. Dated records, such as
+     handoffs, stay as they are.
+  4. Bring `STATUS.md` into the shape. The notice's STATUS section says how, and each
+     item's status word comes from the repo's own tracker.
+  5. Write the stamp's first paragraph into `CLAUDE.md` by hand; `template/CLAUDE.skel.md`
+     has it. `sync` never touches that file.
+  6. `bin/verify <repo> --strict`, then one commit.
+
+The README State section says 0.9.0.
+
 ## 0.8.0 — 2026-11-06
 A repo can now add pre-commit checks of its own. Two managed files change, the commit guard
 and the `REPO-STANDARD.md` notice; `init` and `verify` learn the new folder. Every adopted repo

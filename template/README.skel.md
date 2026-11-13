@@ -3,14 +3,14 @@
 > One paragraph: what this is and who it's for. (Replace this.)
 
 ## Status / where to resume
-See [`docs/dev-notes/STATUS`](docs/dev-notes/STATUS) and the latest handoff in
+See [`docs/tracking/STATUS.md`](docs/tracking/STATUS.md) and the latest handoff in
 `docs/AI/session-handoffs/`.
 
 ## Map — where things are
 - `REPO-STANDARD.md` — this repo follows repo-standard: read it before moving or deleting its
   tools or folders
 - `docs/official/` — end-user documentation
-- `docs/dev-notes/tracker.md` — the work tracker (Bugs / Features / Documentation / Testing)
+- `docs/tracking/tracker.md` — the work tracker (Bugs / Features / Documentation / Testing)
 - `<the deliverable>` — your code / stages
 
 <!-- Front-door contract: a human should learn WHAT this is, WHAT state it's in, and WHERE

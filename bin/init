@@ -9,6 +9,9 @@
 # skeleton of the questions for the vendor.
 # --force is scoped to the shared machinery only, and prints 'over' for each overwrite.
 # A git-repo target must be CLEAN (the migration baseline) — --allow-dirty overrides.
+# Stops before it writes anything in a repo that still keeps a tracking file (tracker.md,
+# tracker.html, tracker-hwm, STATUS) in docs/dev-notes/, the layout before 0.9.0: it names
+# each file and where it moves to. No flag overrides that.
 # Does NOT author content, git init, or commit — those stay yours.
 set -euo pipefail
 # B71's class (convergence K1): an exported CDPATH makes every bare `cd` here both
@@ -35,7 +38,10 @@ while [ $# -gt 0 ]; do
     --name)           [ $# -ge 2 ] || err "--name requires a value"; NAME="$2"; shift 2 ;;
     --force)          FORCE=1; shift ;;
     --allow-dirty)    ALLOW_DIRTY=1; shift ;;  # skip the F10 clean-tree refusal, knowingly
-    -h|--help)        sed -n '2,9p' "$0"; exit 0 ;;
+    # The whole header, to its last comment line: a fixed range (2 to 9) stopped three lines
+    # short once the header had grown, and left out --force, --allow-dirty and what init
+    # never does. Same form as sync's.
+    -h|--help)        awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
     -*)               err "unknown option '$1'" ;;
     *)                if [ -z "$TARGET" ]; then TARGET="$1"; else err "unexpected arg '$1'"; fi; shift ;;
   esac
@@ -78,12 +84,12 @@ sect_of(){
     CLAUDE.md)                              printf '[3] CLAUDE.md' ;;
     REPO-STANDARD.md)                       printf '[3] notice' ;;
     docs/official/DEVIATIONS.*|docs/official/VENDOR-QUESTIONS.md|bin/register) printf '[V] vendor slot' ;;
-    docs/official/*|docs/dev-notes/STATUS)  printf '[2] docs homes' ;;
+    docs/official/*|docs/tracking/STATUS.md) printf '[2] docs homes' ;;
     .claude/settings.json|.claude/hooks/*)  printf '[3] hooks' ;;
     .gitignore|.gitignore.skel)             printf '[3] gitignore' ;;
     .gitattributes|.gitattributes.skel)     printf '[3] eol=lf' ;;
     docs/AI/session-handoffs/*)             printf '[4] handoffs' ;;
-    bin/track|docs/dev-notes/tracker.*)     printf '[5] tracker' ;;
+    bin/track|docs/tracking/tracker.*)      printf '[5] tracker' ;;
     .githooks/pre-commit)                   printf '[6] guard' ;;
     .repo-standard-version)                 printf '[A] archetype' ;;
     docs/reference/*)                       printf '[V] vendor slot' ;;
@@ -108,6 +114,31 @@ if [ -f "$TARGET/standard/STANDARD.md" ] && [ -d "$TARGET/template/bin" ]; then
 fi
 if [ "$(basename "$(cd -- "$TARGET" && pwd)")" = "template" ] && [ -f "$TARGET/../standard/STANDARD.md" ]; then
   err "$TARGET is the standard's template/ directory, not a consumer repo"
+fi
+
+# --- the tracking layout (F21, 0.9.0): never scaffold beside the old one ---------------
+# From 0.9.0 the tracker's three files and STATUS live in docs/tracking/. Before, they sat
+# in docs/dev-notes/, and STATUS had no .md. init writes the new place only, so in a repo
+# that still keeps them in the old one it would stamp an empty STATUS.md and an empty
+# tracker beside the real ones, and every tool from 0.9.0 on would then read the empty pair.
+# Refused HERE, before any write and before the clean-tree check: the layout is the first
+# thing such a repo has to mend, whatever else is in its tree. No flag overrides it:
+# --force is for the machinery, --allow-dirty for the baseline. Moving the files is the
+# repo's own upgrade step: they are authored content, which init never touches.
+# A file counts when it sits at the old path and nothing sits at its new one, and a symlink
+# counts as a file, dangling or not. That is bin/sync's test and bin/verify's, and the
+# words are sync's: keep the three in lockstep.
+lay_move=""
+for pair in tracker.md:tracker.md tracker.html:tracker.html tracker-hwm:tracker-hwm STATUS:STATUS.md; do
+  lay_o="docs/dev-notes/${pair%%:*}"; lay_n="docs/tracking/${pair##*:}"
+  if { [ -e "$TARGET/$lay_o" ] || [ -L "$TARGET/$lay_o" ]; } && ! { [ -e "$TARGET/$lay_n" ] || [ -L "$TARGET/$lay_n" ]; }; then
+    lay_move="$lay_move"$'\n'"        $lay_o -> $lay_n"
+  fi
+done
+if [ -n "$lay_move" ]; then
+  err "$tgt_abs keeps tracking files in docs/dev-notes/, the layout before repo-standard 0.9.0:$lay_move
+      Nothing written. The files move as part of the repo's upgrade to 0.9.0, and init runs
+      after the move. (This checkout is repo-standard $VERSION.)"
 fi
 
 # --- migration baseline: a git-repo target must be CLEAN (F10) -----------------------
@@ -137,7 +168,7 @@ if [ -z "$ALLOW_DIRTY" ] && git -C "$TARGET" rev-parse --is-inside-work-tree >/d
     while IFS= read -r line; do
       f="${line:3}"; f="${f#\"}"; f="${f%\"}"; case "$f" in *" -> "*) f="${f##* -> }" ;; esac
       case "$f" in
-        .claude/settings.json|.claude/hooks/stop-handoff-check.sh|.claude/hooks/session-start-rollover-check.sh|.githooks/pre-commit|bin/track|bin/register|.gitignore|.gitattributes|README.md|CLAUDE.md|REPO-STANDARD.md|docs/dev-notes/STATUS|docs/dev-notes/tracker.md|docs/dev-notes/tracker.html|docs/official/.gitkeep|docs/AI/session-handoffs/.gitkeep|docs/reference/.gitkeep|docs/official/DEVIATIONS.md|docs/official/DEVIATIONS.html|docs/official/VENDOR-QUESTIONS.md|.repo-standard-version) ;;
+        .claude/settings.json|.claude/hooks/stop-handoff-check.sh|.claude/hooks/session-start-rollover-check.sh|.githooks/pre-commit|bin/track|bin/register|.gitignore|.gitattributes|README.md|CLAUDE.md|REPO-STANDARD.md|docs/tracking/STATUS.md|docs/tracking/tracker.md|docs/tracking/tracker.html|docs/official/.gitkeep|docs/AI/session-handoffs/.gitkeep|docs/reference/.gitkeep|docs/official/DEVIATIONS.md|docs/official/DEVIATIONS.html|docs/official/VENDOR-QUESTIONS.md|.repo-standard-version) ;;
         *) scaffold_only=0 ;;
       esac
     done < <(git -C "$TARGET" status --porcelain -uall 2>/dev/null)
@@ -646,11 +677,14 @@ fi
 # section rather than for the skeleton to be filled.
 readme_kept=0; if exists "$TARGET/README.md"; then readme_kept=1; fi
 gen  "$TEMPLATE/README.skel.md"                   "$TARGET/README.md"                 "s|<repo name>|$NAME_SED|"
-# Every adopted repo has a root CLAUDE.md (D34, decided 2026-09-14) — at minimum the pointer
+# Every adopted repo has a root CLAUDE.md (D34, decided 2026-09-14) — at the least the two
+# paragraphs stamped here (F22, 0.9.0): where work stands and who writes what, and the pointer
 # to the personal CLAUDE.local.md. Authored content like README: stamped only when absent.
 gen  "$TEMPLATE/CLAUDE.skel.md"                   "$TARGET/CLAUDE.md"
-gen  "$TEMPLATE/docs/dev-notes/STATUS.skel"       "$TARGET/docs/dev-notes/STATUS"
-gen  "$TEMPLATE/docs/dev-notes/tracker.skel.md"   "$TARGET/docs/dev-notes/tracker.md" "s|<repo>|$NAME_SED|"
+# STATUS.md and the tracker live in docs/tracking/ since 0.9.0 (F21). docs/dev-notes/, the
+# maintainer's own notes, is no longer made here: it is created on first use.
+gen  "$TEMPLATE/docs/tracking/STATUS.skel"        "$TARGET/docs/tracking/STATUS.md"
+gen  "$TEMPLATE/docs/tracking/tracker.skel.md"    "$TARGET/docs/tracking/tracker.md"  "s|<repo>|$NAME_SED|"
 # docs/official/: an authored repo gets the placeholder when the home is empty; a vendor-derived
 # repo's DEVIATIONS.md lives here (D47), so that home is never empty and gets no placeholder.
 [ "$ARCH" = vendor-derived ] || keep "$TARGET/docs/official/.gitkeep"
@@ -809,15 +843,15 @@ fi
 # hand-kept one — was silently overwritten with no --force, and a no-op re-run
 # rewrote its mtime, which the Stop hook read as work-without-a-handoff. Refreshing
 # an existing page is `track render`'s job (and sync's, when the renderer changes).
-if [ -e "$TARGET/docs/dev-notes/tracker.html" ] || [ -L "$TARGET/docs/dev-notes/tracker.html" ]; then
-  printf '  skip  %-16s %s (exists — init renders only a missing page; run track render to refresh it)\n' "$(sect_of "docs/dev-notes/tracker.html")" "docs/dev-notes/tracker.html"
+if [ -e "$TARGET/docs/tracking/tracker.html" ] || [ -L "$TARGET/docs/tracking/tracker.html" ]; then
+  printf '  skip  %-16s %s (exists — init renders only a missing page; run track render to refresh it)\n' "$(sect_of "docs/tracking/tracker.html")" "docs/tracking/tracker.html"
   skipped=$((skipped+1))
 elif [ -x "$TARGET/bin/track" ] && [ ! -L "$TARGET/bin/track" ] && parents_ok "$TARGET/bin/track" \
-   && [ -f "$TARGET/docs/dev-notes/tracker.md" ] && [ ! -L "$TARGET/docs/dev-notes/tracker.md" ] \
-   && parents_ok "$TARGET/docs/dev-notes/tracker.md"; then
-  TRACKER_FILE="$TARGET/docs/dev-notes/tracker.md" "$TARGET/bin/track" render >/dev/null 2>&1 \
-    && [ -f "$TARGET/docs/dev-notes/tracker.html" ] \
-    && { printf '  gen   %-16s %s\n' "$(sect_of "docs/dev-notes/tracker.html")" "docs/dev-notes/tracker.html"; added=$((added+1)); } || true
+   && [ -f "$TARGET/docs/tracking/tracker.md" ] && [ ! -L "$TARGET/docs/tracking/tracker.md" ] \
+   && parents_ok "$TARGET/docs/tracking/tracker.md"; then
+  TRACKER_FILE="$TARGET/docs/tracking/tracker.md" "$TARGET/bin/track" render >/dev/null 2>&1 \
+    && [ -f "$TARGET/docs/tracking/tracker.html" ] \
+    && { printf '  gen   %-16s %s\n' "$(sect_of "docs/tracking/tracker.html")" "docs/tracking/tracker.html"; added=$((added+1)); } || true
 fi
 
 # The register's page, on the same terms as tracker.html above: only when absent, never

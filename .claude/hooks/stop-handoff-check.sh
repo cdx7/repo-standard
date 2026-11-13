@@ -8,8 +8,11 @@
 # DUE: (1) <=2h since latest handoff -> NOT due (anti-nag grace, B155; none for a handoff
 # whose NAME is dated ahead of the clock, B144); (2) else any
 # UNCOMMITTED path (per git status) modified more recently than the latest handoff
-# (excluding dev-notes/STATUS + the handoffs; plain mtime walk in a non-git tree)
+# (excluding tracking/STATUS.md + the handoffs; plain mtime walk in a non-git tree)
 # -> DUE; (3) else <=12h old -> NOT due; (4) else / no handoff -> DUE.
+# STATUS.md is the standard's resume pointer, kept true at every handoff, so an edit to it
+# alone is not work without a handoff. It is docs/tracking/STATUS.md from 0.9.0 (F21); the
+# file left out before that was docs/dev-notes/STATUS, which is now a note like any other.
 # Portable, no jq, loop-safe.
 set -uo pipefail
 input="$(cat 2>/dev/null || true)"
@@ -168,7 +171,7 @@ else
             okeep=0 orel=""
             case "$_origin" in "$prefix"*) okeep=1; orel="${_origin#"$prefix"}" ;; esac
             [ -n "$_origin" ] || okeep=0
-            case "$orel" in dev-notes/STATUS|*/dev-notes/STATUS) okeep=0 ;; esac
+            case "$orel" in tracking/STATUS.md|*/tracking/STATUS.md) okeep=0 ;; esac
             case "$top/$_origin" in "$hdir"/*) okeep=0 ;; esac
             if [ "$okeep" = 1 ]; then
               p="$top/$_origin"
@@ -190,7 +193,7 @@ else
           */) case "$prefix" in "$f"*) keep=1; rel="$f" ;; esac ;;
         esac
         [ "$keep" = 1 ] || continue
-        case "$rel" in dev-notes/STATUS|*/dev-notes/STATUS) continue ;; esac
+        case "$rel" in tracking/STATUS.md|*/tracking/STATUS.md) continue ;; esac
         case "$top/$f" in "$hdir"/*) continue ;; esac
         # Deleted path: fall back to the nearest surviving ancestor's mtime (B103).
         # [ ! -h ] keeps a present-but-DANGLING symlink out of the walk: -e follows
@@ -220,16 +223,16 @@ else
         # pre-first-commit project is exactly a collapsed '?? docs/' over it — the
         # handoff itself was the guaranteed hit, and the demanded new handoff
         # recreated the state: a perpetual nag, the exact thing the epoch-reset
-        # comment above promises away. dev-notes/STATUS likewise. -path pattern-
+        # comment above promises away. tracking/STATUS.md likewise. -path pattern-
         # matches, so glob chars in $hdir are the newline residue's class.
         if [ -d "$p" ] && [ ! -h "$p" ]; then
           m="$(stat -c %Y "$p" 2>/dev/null || stat -f %m "$p" 2>/dev/null || echo 0)"
           if [ "$m" -gt "$cmp_epoch" ]; then changed="${rel:-$f}"; break; fi
           hit="$(find "$p" -mindepth 1 \( -path '*/.git' -o -name node_modules -o -name .venv -o -name vendor \
-                     -o -path "$hdir" -o -path '*/dev-notes/STATUS' \) -prune \
+                     -o -path "$hdir" -o -path '*/tracking/STATUS.md' \) -prune \
                    -o -newermt "@$cmp_epoch" -print -quit 2>/dev/null)" \
             || hit="$(find "$p" -mindepth 1 \( -path '*/.git' -o -name node_modules -o -name .venv -o -name vendor \
-                          -o -path "$hdir" -o -path '*/dev-notes/STATUS' \) -prune \
+                          -o -path "$hdir" -o -path '*/tracking/STATUS.md' \) -prune \
                         -o -newer "$newest" -print -quit 2>/dev/null)"
           if [ -n "$hit" ]; then changed="${rel:-$f}"; break; fi
           continue
@@ -247,7 +250,7 @@ else
         # same accepted over-sensitivity, as B103's deletion side: unrelated churn
         # beside the target can cost one extra, dischargeable nag. Renames are
         # file entries, so the collapsed-directory branch above never swallows
-        # this; a target inside $hdir or dev-notes/STATUS was already excluded.
+        # this; a target inside $hdir or tracking/STATUS.md was already excluded.
         if [ "$rt" = 1 ]; then
           pp="${p%/*}"; [ "${#pp}" -ge "${#top}" ] || pp="$top"
           m="$(stat -c %Y "$pp" 2>/dev/null || stat -f %m "$pp" 2>/dev/null || echo 0)"
@@ -261,7 +264,7 @@ else
       # exactly the trees that have no git status to fall back on.
       while IFS= read -r f; do
         [ -n "$f" ] || continue
-        case "$f" in */dev-notes/STATUS) continue ;; "$hdir"/*) continue ;; esac
+        case "$f" in */tracking/STATUS.md) continue ;; "$hdir"/*) continue ;; esac
         changed="$f"; break
       done < <(find "$root" -mindepth 1 \
                  \( -path '*/.git' -o -name node_modules -o -name .venv -o -name vendor \) -prune \
@@ -286,7 +289,16 @@ dest="${hdir:-$root/docs/AI/session-handoffs}/session-handoff-${stamp}.md"
 # stamped into repos that receive none of the standard's documentation, so a citation
 # ("the project's exit-handoff rule", "the handoff format") dangles the moment the
 # hook travels (D10, B07's class).
-msg="A session handoff is DUE before you stop (${reason}).${fix} Write it now at ${dest} with H1 'Session handoff — ${h1}', then you may stop. Cover, briefly: focus (what this session set out to do), what changed (files, decisions, commits), results/verdicts, next steps for the session that resumes, and traps (anything that cost time or would mislead a reader). The handoff is the next session's only context — write it to be resumed. (If the user explicitly asked you not to, or this session changed nothing, say so and stop.)"
+# Two sentences came with 0.9.0 (F22). The first: a handoff says nothing about its own
+# commit. It is written before that commit, so whatever it says of it is stale once the
+# commit lands; the sentence names the two forms the lapse takes, a list of what is
+# uncommitted and a line that the commit waits for a go. The second is the reminder that
+# keeps STATUS.md true at each handoff. It is said only where docs/tracking/STATUS.md
+# exists, so the message never names a file the repo does not have.
+# No backticks in the message: it is a double-quoted shell string, where one runs a command.
+stnote=""
+[ -f "$root/docs/tracking/STATUS.md" ] && stnote=" Then check $root/docs/tracking/STATUS.md and change only what is no longer true; that change goes into the same commit as the handoff."
+msg="A session handoff is DUE before you stop (${reason}).${fix} Write it now at ${dest} with H1 'Session handoff — ${h1}', then you may stop. Cover, briefly: focus (what this session set out to do), what changed (files, decisions, commits), results/verdicts, next steps for the session that resumes, and traps (anything that cost time or would mislead a reader). The handoff says nothing about its own commit: do not list what is uncommitted or write that the commit waits for a go, because git status shows that.${stnote} The handoff is the next session's only context — write it to be resumed. (If the user explicitly asked you not to, or this session changed nothing, say so and stop.)"
 # JSON-escape rather than strip (B54): a backslash or double-quote in a path must
 # survive into valid JSON, not vanish from the message. ALL control chars become
 # spaces — enumerating just \n\r\t left the other 26 C0 bytes to break the JSON.

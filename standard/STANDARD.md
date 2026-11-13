@@ -44,8 +44,9 @@ all memo and no mechanism (`verify` checks none of them):
 
 - The README's map has one line per folder: what it is, where it stands, where its own README
   is. A folder's README stays beside its scripts; `docs/official/` is a home, not a mandate.
-- `STATUS` lines and tracker row names start with the folder name, so the maintainer's queue
-  and the tracker's page read as a per-folder board without a column for it.
+- `STATUS.md` items and tracker row names start with the folder name (the item's form is in
+  section 10), so the maintainer's queue and the tracker's page read as a per-folder board
+  without a column for it.
 - One dated handoff stream at the root, never a HANDOFF file in a folder; each handoff's first
   line names the folder it worked in. The hooks and the rollover need nothing more.
 - A folder leaves for a repo of its own when it stops being play: when something else depends
@@ -93,7 +94,7 @@ can't orient you in half a minute, the context cost has already been paid in con
 
 ### 2. `docs/` homes (fixed names)
 
-**What.** Four fixed homes, each with one job:
+**What.** Five fixed homes, each with one job:
 
 - `docs/official/` — end-user documentation *you authored*. A home, not a mandate: a
   deliverable that already lives at the root and is mapped from the README is conformant;
@@ -101,16 +102,23 @@ can't orient you in half a minute, the context cost has already been paid in con
   too: what marks it unfinished is a notice at its top plus a tracker row, never its folder,
   so nothing moves when it is done. <!-- (D45) -->
 - `docs/AI/` — Claude's durable output: session handoffs, audits, notes, design docs.
-- `docs/dev-notes/` — the maintainer's own working notes: `STATUS` + `tracker.md`. **Claude
-  does not overwrite these** — they belong to the human. One exception: an empty `STATUS`
-  skeleton that `init` just created may be filled once, from the repo's own record. A `STATUS`
-  the human has written is append-only (a dated pointer to the handoff), and any judgment
-  about the human's queue goes in that handoff, not in `STATUS`.
+- `docs/tracking/` — where work stands: `STATUS.md` (section 10) and the work tracker
+  (section 5), which is `tracker.md`, its page `tracker.html` and the `tracker-hwm` sidecar.
+  `bin/track` keeps the tracker. The session keeps `STATUS.md` true, and its queue is the
+  maintainer's. <!-- (F21) -->
+- `docs/dev-notes/` — the maintainer's own working notes, created on first use. **A session
+  does not write here unless it is asked to**: the notes belong to the human.
+  <!-- (F21, D53) -->
 - `docs/assets/` — images and binaries, created on first use.
 
 **Why.** Fixed names mean you never hunt for "where do the handoffs go" or "where's the real
-vendor spec." The `official` / `AI` / `dev-notes` split keeps authored, generated, and personal
-content from silently overwriting each other.
+vendor spec." The split keeps what was authored, what was generated, what tracks the work and
+what is one person's own from silently overwriting each other.
+
+Until 0.9.0 the tracker and `STATUS` lived in `docs/dev-notes/`, under the rule that Claude
+does not overwrite the maintainer's notes. By then that rule described neither file: a tool
+kept the tracker, and sessions edited `STATUS` on the maintainer's go. So the two got a home
+of their own, and `docs/dev-notes/` holds the maintainer's notes and nothing else.
 
 **Relocations.** Moving existing material into a home is a relocation: relative links inside
 the moved files, and every script, config or doc naming the old path, break — and `verify`
@@ -126,9 +134,14 @@ changes to Current with that day's date. <!-- (D46) -->
 
 **Tooling.**
 
-- `init` creates the homes.
-- `verify` checks the three required ones exist — `docs/assets/` is deliberately unchecked,
-  because it is created on first use and its absence is conformant. <!-- (D13) -->
+- `init` creates the three required homes: `docs/official/`, `docs/AI/` and `docs/tracking/`.
+- `verify` checks that those three exist. `docs/dev-notes/` and `docs/assets/` are
+  deliberately unchecked: each is created on first use, and its absence is conformant.
+  <!-- (D13, F21) -->
+- No tool reads both layouts. A repo that still keeps a tracking file in `docs/dev-notes/`
+  is told so by `init`, `verify` and `sync`, and by `bin/track` when the tracker itself is
+  still there. None of them changes it. See the three below, and section 5 for `bin/track`.
+  <!-- (F21) -->
 
 ### 3. `.claude/` hooks and `CLAUDE.md`
 
@@ -155,16 +168,26 @@ paths) so the same script drops into any repo unchanged.
 
 **`CLAUDE.md`.** Every adopted repo has a root `CLAUDE.md`, the file Claude Code loads in full
 at the start of every session. It holds standing instructions only (what belongs there:
-section 4), and it may consist of nothing but the statement that all Claude directives for the
-repo are in `CLAUDE.local.md`. That file is personal, like `settings.local.json`: Claude Code
-loads it after `CLAUDE.md` in every session, and it is **never committed**. Subfolders may
-carry their own `CLAUDE.md` under the same rule: standing instructions only. <!-- (D34, F16) -->
+section 4). The smallest one is the two paragraphs `init` stamps, both described below: the
+first, on where work stands and who writes what; and the pointer to `CLAUDE.local.md`,
+which may say that every other Claude directive for the repo is there. Without the first,
+nothing a session loads at its start leads to the notice. `CLAUDE.local.md` is personal,
+like `settings.local.json`: Claude Code loads it after `CLAUDE.md` in every session, and it
+is **never committed**. Subfolders may carry their own `CLAUDE.md` under the same rule:
+standing instructions only. <!-- (D34, F16; the smallest form: F22, 0.9.0) -->
 
 - `init` stamps a minimal `CLAUDE.md` when the repo has none, and never overwrites one that
   exists. The stamp says personal directives, if any, go in `CLAUDE.local.md`; it does not
   claim that file exists, because a repo new to the standard seldom has one. <!-- (B149) -->
+- The stamp's first paragraph says where work stands (`docs/tracking/STATUS.md` and the
+  handoffs), tells the session to keep STATUS true (section 10), and points at
+  `REPO-STANDARD.md` for who writes what, to be read before the first change. The rules
+  themselves sit in the notice because `sync` replaces it; `init` writes `CLAUDE.md` once and
+  `sync` never touches it. So a `CLAUDE.md` that was there before the standard, or that was
+  stamped before 0.9.0, has that paragraph only when it is written in by hand. <!-- (F22) -->
 - `verify` warns when an adopted repo has no root `CLAUDE.md` — a todo that blocks the
-  `--strict` sign-off, like the front door's state section.
+  `--strict` sign-off, like the front door's state section. It checks that the file is
+  there, never what it says: the two paragraphs are a memo, not a mechanism.
 
 **`REPO-STANDARD.md`.** Every adopted repo also has the standard's notice at its root: the same
 text in every repo, saying that the repo follows repo-standard, which files the standard
@@ -172,6 +195,15 @@ manages (do not edit, move or delete them), which names the hooks and tools find
 is generated, what is the repo's own, and how to check and update. Without it, the standard's
 files are fingerprints nobody can read: `bin/` looks deletable and the `docs/` tree
 restructurable, and either breaks the tooling quietly. <!-- (0.5.0) -->
+
+Since 0.9.0 it also says **who writes what**, and how `STATUS.md` is kept. This document
+does not travel: what an adopted repo gets is the notice, the `CLAUDE.md` stamp, the
+skeletons' comments and the hooks' messages. So the rules a session must know before it
+changes anything are gathered in the notice. `docs/dev-notes/` is the maintainer's
+(section 2). The session keeps `STATUS.md` true, and the rest of it is the maintainer's
+(section 10). A commit or a push waits for a go, with what changed shown first (section 8).
+And there are the logoff rule and the handoff that says nothing about its own commit
+(section 4). <!-- (D53, F22) -->
 
 - `init` installs it and `sync` keeps it current, like the hooks: a local edit is replaced.
   Line 2 of every managed script points to it, and the README skeleton's map opens with it.
@@ -243,13 +275,39 @@ a `core.autocrlf=true` clone otherwise checks them out with CRLF and every hook 
 the dead ends, the "next concrete step." Monthly bucketing keeps the directory scannable
 instead of accreting into an undated pile.
 
+**A handoff says nothing about its own commit.** It is written before that commit. A line
+that lists what is uncommitted, or that says the commit waits for a go, is out of date the
+moment the commit lands, and the next session reads it as the current state. `git status`
+shows what is uncommitted. A handoff keeps what git cannot show: decisions, a question that
+waits for an answer, traps. The commits that did happen stay in its account of what changed.
+<!-- (F22) -->
+
+**The logoff rule.** Before the maintainer leaves, the session makes sure its work is in a
+handoff. A session that changed nothing says so and writes none. Otherwise, first match
+wins:
+
+- any file changed since the newest handoff, a change to `docs/tracking/STATUS.md` alone
+  excepted: write a new handoff now;
+- otherwise, a handoff from the last 12 hours is enough;
+- otherwise (an older one, or none): write one now.
+
+During a session the Stop hook asks on a looser schedule, because it runs at the end of
+every reply and cannot see a logoff coming. It does not ask within two hours of the newest
+handoff, unless that handoff is named ahead of the clock. After that it asks when an
+uncommitted file has changed since the handoff, and otherwise once the handoff is 12 hours
+old. With no handoff at all, it asks. <!-- (D53) -->
+
 **What goes in `CLAUDE.md`.** Standing instructions only (every adopted repo has one: section
-3); anything that reads like "where I left off" belongs in `STATUS` or a handoff. A root
+3); anything that reads like "where I left off" belongs in `STATUS.md` or a handoff. A root
 `CLAUDE.md` loads in full every session, and neither the hooks nor `verify` read it for where to
 resume.
 
 **Tooling.**
 
+- The Stop hook asks for a handoff when one is due. Its message carries the two rules a
+  session needs at that moment: the handoff says nothing about its own commit; and, where
+  `docs/tracking/STATUS.md` exists, STATUS is checked and only what is no longer true is
+  changed, in the same commit (section 10). <!-- (F22) -->
 - The SessionStart hook nudges when top-level handoffs belong to a past month.
 - `verify` reports the same drift as a warning.
 
@@ -278,7 +336,7 @@ same steps inline so they travel with stamped repos). Per stale month `YYYY-MM`,
 
 ### 5. Work tracker
 
-**What.** One file, `docs/dev-notes/tracker.md`, with four categories — **Bugs / Features /
+**What.** One file, `docs/tracking/tracker.md`, with four categories — **Bugs / Features /
 Documentation / Testing**.
 
 - Every row carries a status, a stable ID (`B`/`F`/`D`/`T` prefix, zero-padded to at least two
@@ -292,7 +350,7 @@ Documentation / Testing**.
   `## Details` heading after the four tables: `### <ID> — <Name>` (the row's Name exactly),
   then free text, written by hand. The Description stays a one-line summary. `track render`
   shows the section under its row and refuses one it cannot match to exactly one row.
-- Backing that up, `track add` maintains a `docs/dev-notes/tracker-hwm` sidecar recording the
+- Backing that up, `track add` maintains a `docs/tracking/tracker-hwm` sidecar recording the
   highest ID ever issued per prefix, so once it exists a hand-pruned top-level row cannot cause
   its number to be reissued. The sidecar is **self-installing**: it is first written by the
   first *top-level* `track add` after this feature (a `--parent` add never writes it), seeded
@@ -310,6 +368,15 @@ because a static table stops being useful the moment it has more than a screen o
 **Tooling.**
 
 - `track add` / `track set-status` mutate the file and auto-render the view.
+- After a status change, `track set-status` prints one more line, on standard error, when
+  `STATUS.md` beside the tracker names the row: the file, each line that names it, and the
+  reminder to change only what is no longer true there, in the same commit (section 10).
+  The line says that STATUS names the row, never whether STATUS is right, and it never stops
+  the command. <!-- (F22) -->
+- `track` looks for `docs/tracking/tracker.md`. In a repo that still keeps its tracker in
+  `docs/dev-notes/`, the layout before 0.9.0, it stops before any command runs and says so.
+  It does not go on to another repo's tracker or to `./tracker.md`; `TRACKER_FILE` still
+  names a tracker anywhere. <!-- (F21) -->
 - `track render --check` detects a stale view.
 - `track history <ID>` prints an item's history from git: each version of its row and detail
   section, the commits that name it, and the files that cite it. Nothing is recorded; git
@@ -363,7 +430,9 @@ structure.)
 ### 8. Version control
 
 **What.** Everything durable is version-controlled. But get an explicit go-ahead from the
-maintainer immediately before the actual `git commit` / `git push`.
+maintainer immediately before the actual `git commit` / `git push`, every time, and show what
+changed first: `STATUS.md`'s diff above all, because a session edits that file itself
+(section 10). <!-- (D53) -->
 
 **Why.** Durability is the default; surprise commits are not. The gate keeps an agent from
 committing on the human's behalf before the human has looked.
@@ -387,6 +456,81 @@ root (the `z-` sorts it to the bottom).
 
 **Why.** Deleting loses history; leaving it inline creates false current-state. One convention,
 out of the way but recoverable.
+
+### 10. `STATUS.md` — where work stands
+
+*(Section 10 since 0.9.0. It stands last so that sections 1 to 9 keep their numbers.)*
+
+**What.** `docs/tracking/STATUS.md` is orientation, not history: 20 to 30 lines of pointers,
+in three sections under the H1 `# WHERE AM I?`. The count is of what stands above the
+skeleton's closing comment.
+
+- `## NOW` holds only what is current, blocked work included. Finished work leaves for the
+  handoffs.
+- `## NEXT` holds tracker rows, in order, at most five. Work that has no row can queue there
+  too, under a short name.
+- `## EVENTUALLY` holds ideas that have no row yet. When one gets a row, it leaves.
+
+A section with nothing in it keeps its heading, so a reader finds the same three in every
+repo.
+
+**The item line.** `<folder>: <ID>, <ID> · <status> · <words>`
+
+- **The folder** and its colon are there only in a repo that holds several small projects
+  ("One repo, several small projects", above).
+- **The row or rows,** by ID. Rows that share an item share a status. Work with no row
+  carries a short name in the rows' place.
+- **The status** is the row's own, in the tracker's word (`open`, `in-progress` and the
+  rest), on every item. A blocked item says `BLOCKED on <whom or what>`. Blocked is a
+  status, not a section: it shows wherever the item sits.
+- **What follows is free words:** what it is, and what picks it back up.
+
+**Pointers to handoffs.** STATUS never points at the newest handoff, because every new
+handoff would leave that pointer one behind. An item ends with a pointer only when the newest
+handoff does not cover it, written as the stamp from the file's name,
+`handoff YYYY-MM-DD-HHMM`, never as a path. The rollover's repoint step (section 4) searches
+for paths, so a stamp never forces an edit of STATUS; and after a rollover the stamp's date
+still leads to the handoff, in that day's file. When such an item moves: the handoff is
+written, then STATUS is repointed, and both go into one commit.
+
+**Who writes it.** The session keeps STATUS true. Whenever it writes a handoff, or changes a
+tracker row's status, it checks STATUS, changes only what is no longer true, and puts that in
+the same commit, where the maintainer sees it at the commit gate (section 8). Everything else
+in STATUS is the maintainer's: what is in the queue, and in what order. A session asks first.
+
+**Why.** STATUS says in half a minute what is being worked on and what comes next: it is
+where the README skeleton's state section points (section 1). The handoffs hold the
+history, and the tracker holds every row. It is short because a long one is not read.
+
+- **The status word.** In the four repos that tried this shape, 12 items were blocked by
+  their tracker row or by their line, and only 3 said so in both. With the tracker's word on
+  every line, a finished row still under NOW, or a line that disagrees with its row, shows
+  at a glance.
+- **Kept true by the session.** STATUS is checked at two moments a session cannot miss: when
+  it writes a handoff, and when it changes a row's status. A fact that changes with neither
+  waits for the next handoff. A session that noticed a stale line, asked, and waited left it
+  stale for hours; a session that changes the line shows the change at the commit gate, and
+  the maintainer still decides.
+- **Written where a session reads.** In one of those repos, finished work stayed under NOW
+  with its commit hashes: no session there had ever seen the rules. They were written in a
+  design note, and this document does not travel.
+
+**Tooling.**
+
+- `init` writes the skeleton: the H1, the three headings, and a comment that carries these
+  rules in brief. The comment is at the bottom, where a session still reads it and a rendered
+  page hides it.
+- Three reminders reach a session where it works: the paragraph in `CLAUDE.md` (section 3:
+  `init` stamps it into a new one, and it is written by hand into one that was there
+  before), two sentences in the Stop hook's message (section 4), and the line
+  `track set-status` prints (section 5). The rules in full are in the notice,
+  `REPO-STANDARD.md`.
+- The Stop hook leaves `docs/tracking/STATUS.md` out of its test for changed files: the file
+  is kept true at every handoff, so an edit to it alone is not work without a handoff.
+- `verify` warns when an adopted repo has no `STATUS.md`, or when it is not a regular file,
+  and never reads it. `track set-status` looks in it for a row's ID and for nothing else. No
+  tool reads the headings or the form of an item. A check for a STATUS that names a finished
+  row is held back, a memo until drift says otherwise. <!-- (F22) -->
 
 ---
 
@@ -510,6 +654,12 @@ Stamps `template/` into a repo, idempotently content-wise (never overwrites; rep
   is refused unless `--allow-dirty` is passed (F10, the migration baseline).
 - The target directory must already exist — a mistyped path errors instead of scaffolding a
   fresh tree at the typo.
+- A repo that still keeps a tracking file in `docs/dev-notes/`, the layout before 0.9.0, is
+  refused before anything is written, whatever the flags. The test, which `verify` and `sync`
+  share: one of `tracker.md`, `tracker.html`, `tracker-hwm` or `STATUS` there, a link
+  counting as a file, with nothing at its path in `docs/tracking/`. (`bin/track` makes the
+  same test for the tracker alone.) `init` would otherwise write an empty tracker and STATUS
+  beside the real ones. The files move first. <!-- (F21) -->
 - Renders the initial tracker view **only when no `tracker.html` exists** (refreshing an
   existing page is `track render`'s job) and marks the hooks executable, so a fresh repo passes
   `verify` immediately.
@@ -536,6 +686,12 @@ Read-only conformance lint over the *mechanical* rules above — the ones a scri
   `--strict`).
 - Read-only is literal: the tracker staleness check runs on a copy in a temp directory outside
   the audited tree, and the register's checks render into one.
+- **A repo that has not moved.** Where a tracking file is still in `docs/dev-notes/` (the
+  test is `init`'s, above), one line among the docs homes says so, in place of the checks on
+  `docs/tracking/`, `STATUS.md` and the tracker, which wait for the move. Under a stamp older
+  than 0.9.0 the line is a note and counts as nothing: the repo is laid out as its own
+  version of the standard asks. Where no version can be read it is a note as well. Under a
+  stamp of 0.9.0 or later it is a warning. <!-- (F21) -->
 - In a vendor-derived repo it checks `bin/register` and runs `register check` and
   `register map --check`. A stale summary or `DEVIATIONS.html` is a `FAIL`, as a stale
   `tracker.html` is; everything else they find is a `WARN`, a register not yet migrated
@@ -575,7 +731,10 @@ visible in every diff of that file and cannot rot in a central list.
   marker you added but have not committed excuses nothing yet, exactly the mid-remediation
   state that used to read green.
 - A file that cannot carry a text line (a binary keystore, say) declares itself instead through
-  a **committed sidecar** `<file>.allow-committed` containing the same marker.
+  a **committed sidecar** `<file>.allow-committed` containing the same marker. So may a file
+  that could carry the line but must stay byte for byte as it was received, a captured key or
+  a vendor's file: `verify` accepts the sidecar beside any file, and which of the two a file
+  uses is the repo's choice. <!-- (D50) -->
 - The marker is the *mechanism* only — record the reasoning in `docs/official/DEVIATIONS.md`
   (vendor-derived)
   or the README (authored). Nothing else is waivable: an undeclared secret-shaped **file** that
@@ -605,6 +764,11 @@ you still gate the commit); refreshes the version stamp.
 - Never touches authored content, never writes through a symlink — whether the link is the
   destination itself or any parent directory on the way there — or onto a non-regular file (the
   destination is replaced, or the write is refused loudly).
+- A target that still keeps a tracking file in `docs/dev-notes/` (the test is `init`'s, above)
+  stops it before anything is written: exit 2, naming each file and where it goes. `--check`
+  reports such a repo as out of date, one `MOVE` line per file, and exits 1. Moving an
+  authored file is not `sync`'s job, so the files move first and `sync` runs after. The
+  standard's own tree is held to the same test. <!-- (F21) -->
 - A symlinked machinery destination is refused **even while its content matches the canon** (a
   stow-style consumer can never be green): sync can never manage that file, so it fails early,
   not on the day the template first changes.

@@ -1,0 +1,17 @@
+# WHERE AM I?
+
+## NOW
+
+## NEXT
+
+## EVENTUALLY
+
+<!-- How this file is kept (repo-standard; the rules in full are in REPO-STANDARD.md):
+     - It is orientation, not history: 20 to 30 lines of pointers above this comment.
+     - NOW: only what is current, blocked work included. Finished work leaves for the handoffs.
+     - NEXT: tracker rows, in order, at most five.
+     - EVENTUALLY: ideas that have no row yet.
+     - An item: <folder>: <ID>, <ID> · <status> · <words>. The status is the tracker's own
+       word, and a blocked item says BLOCKED on <whom or what>.
+     - A session keeps this file true, at each handoff and each change of a row's status, in
+       the same commit. Anything else here is the maintainer's: ask first. -->
